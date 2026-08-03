@@ -28,3 +28,7 @@ Copy `manifest.json`, `main.js`, and `styles.css` into:
 ```
 
 Then enable **Desktop Sticky Notes** under Obsidian's community-plugin settings. This plugin requires the desktop version of Obsidian.
+
+## License
+
+Desktop Sticky Notes is available under the [MIT License](LICENSE).
