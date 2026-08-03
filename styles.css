@@ -1,0 +1,73 @@
+body.desktop-sticky-note {
+  --sticky-note-background: #fff3a3;
+  background: var(--sticky-note-background) !important;
+}
+
+body.desktop-sticky-note .app-container,
+body.desktop-sticky-note .workspace,
+body.desktop-sticky-note .workspace-split,
+body.desktop-sticky-note .workspace-tabs,
+body.desktop-sticky-note .workspace-tab-container,
+body.desktop-sticky-note .workspace-leaf,
+body.desktop-sticky-note .workspace-leaf-content,
+body.desktop-sticky-note .view-content,
+body.desktop-sticky-note .markdown-reading-view,
+body.desktop-sticky-note .markdown-source-view,
+body.desktop-sticky-note .cm-editor {
+  background: var(--sticky-note-background) !important;
+}
+
+body.desktop-sticky-note .workspace-tab-header-container,
+body.desktop-sticky-note .status-bar {
+  display: none;
+}
+
+body.desktop-sticky-note .view-header {
+  border-bottom-color: color-mix(in srgb, currentColor 14%, transparent);
+  -webkit-app-region: drag;
+}
+
+/* Sticky notes use their own Hide action, so the frameless window controls
+   would be redundant and can overlap the note toolbar. */
+body.desktop-sticky-note .titlebar-button-container.mod-right {
+  display: none !important;
+}
+
+body.desktop-sticky-note .view-header .view-actions,
+body.desktop-sticky-note .view-header .view-action,
+body.desktop-sticky-note .view-header button,
+body.desktop-sticky-note .view-header input {
+  -webkit-app-region: no-drag;
+}
+
+body.desktop-sticky-note .view-actions .desktop-sticky-note-hide {
+  order: 999;
+  margin-left: auto;
+}
+
+body.desktop-sticky-note .view-content {
+  padding-bottom: 8px;
+}
+
+body.desktop-sticky-note .desktop-sticky-note-color-picker {
+  appearance: none;
+  -webkit-appearance: none;
+  order: -999;
+  width: 24px;
+  height: 24px;
+  margin: 0 4px;
+  padding: 0;
+  cursor: pointer;
+  border: 0;
+  border-radius: 50%;
+  background: transparent;
+}
+
+body.desktop-sticky-note .desktop-sticky-note-color-picker::-webkit-color-swatch-wrapper {
+  padding: 0;
+}
+
+body.desktop-sticky-note .desktop-sticky-note-color-picker::-webkit-color-swatch {
+  border: 1px solid var(--background-modifier-border);
+  border-radius: 50%;
+}
