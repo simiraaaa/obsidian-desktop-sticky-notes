@@ -5,6 +5,8 @@ const DEFAULT_COLOR = "#fff3a3";
 const DEFAULT_WIDTH = 360;
 const DEFAULT_HEIGHT = 360;
 const WINDOW_NAME_PREFIX = "desktop-sticky-notes:";
+const LEGACY_DEFAULT_GLOBAL_SHORTCUT = "CommandOrControl+Alt+N";
+const DEFAULT_GLOBAL_SHORTCUT = process.platform === "darwin" ? "Option+F10" : "Super+F10";
 
 interface StickyNoteSettings {
   defaultFolder: string;
@@ -23,7 +25,7 @@ interface WindowPosition {
 const DEFAULT_SETTINGS: StickyNoteSettings = {
   defaultFolder: "",
   defaultNoteColor: DEFAULT_COLOR,
-  globalToggleShortcut: "CommandOrControl+Alt+N",
+  globalToggleShortcut: DEFAULT_GLOBAL_SHORTCUT,
   topLevelNotePath: null,
   topLevelWindowPosition: null,
   colorsByPath: {}
@@ -98,6 +100,10 @@ export default class DesktopStickyNotesPlugin extends Plugin {
     const stored = await this.loadData() as Partial<StickyNoteSettings> & { openNotePaths?: unknown };
     delete stored.openNotePaths;
     this.settings = Object.assign({}, DEFAULT_SETTINGS, stored);
+    if (stored.globalToggleShortcut === LEGACY_DEFAULT_GLOBAL_SHORTCUT) {
+      this.settings.globalToggleShortcut = DEFAULT_GLOBAL_SHORTCUT;
+      await this.saveSettings();
+    }
   }
 
   async saveSettings(): Promise<void> {
@@ -717,7 +723,7 @@ class DesktopStickyNotesSettingTab extends PluginSettingTab {
       .setName("Global toggle shortcut")
       .setDesc("System-wide shortcut for toggling the top-level sticky note. Leave blank to disable.")
       .addText((text) => text
-        .setPlaceholder("CommandOrControl+Alt+N")
+        .setPlaceholder(DEFAULT_GLOBAL_SHORTCUT)
         .setValue(this.plugin.settings.globalToggleShortcut)
         .onChange(async (value) => {
           this.plugin.settings.globalToggleShortcut = value.trim();
