@@ -16,7 +16,7 @@ Each sticky-note window has controls for keeping it on top, selecting a color, s
 
 - **Default notes folder** — where newly created sticky-note files are stored; defaults to the vault root.
 - **Default note color** — the initial background color for notes without a saved custom color.
-- **Global toggle shortcut** — toggles the top-level sticky note even when Obsidian is in the background. The default is `Super+F10` (`Win+F10`) on Windows and `Option+F10` on macOS; leave it empty to disable it.
+- **Global toggle shortcut** — toggles the top-level sticky note even when Obsidian is in the background. Click the recorder and press the desired combination, or clear it to disable the shortcut. The default is `Win+F10` on Windows and `Option+F10` on macOS.
 - **Top-level note** — the Markdown file controlled by the toggle command and global shortcut.
 
 ## Installation

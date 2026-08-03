@@ -8,6 +8,84 @@ const WINDOW_NAME_PREFIX = "desktop-sticky-notes:";
 const LEGACY_DEFAULT_GLOBAL_SHORTCUT = "CommandOrControl+Alt+N";
 const DEFAULT_GLOBAL_SHORTCUT = process.platform === "darwin" ? "Option+F10" : "Super+F10";
 
+const ACCELERATOR_KEYS_BY_CODE: Record<string, string> = {
+  Space: "Space",
+  Tab: "Tab",
+  CapsLock: "Capslock",
+  NumLock: "Numlock",
+  ScrollLock: "Scrolllock",
+  Backspace: "Backspace",
+  Delete: "Delete",
+  Insert: "Insert",
+  Enter: "Enter",
+  ArrowUp: "Up",
+  ArrowDown: "Down",
+  ArrowLeft: "Left",
+  ArrowRight: "Right",
+  Home: "Home",
+  End: "End",
+  PageUp: "PageUp",
+  PageDown: "PageDown",
+  PrintScreen: "PrintScreen",
+  Minus: "-",
+  Equal: "=",
+  BracketLeft: "[",
+  BracketRight: "]",
+  Backslash: "\\",
+  Semicolon: ";",
+  Quote: "\"",
+  Backquote: "`",
+  Comma: ",",
+  Period: ".",
+  Slash: "/",
+  NumpadDecimal: "numdec",
+  NumpadAdd: "numadd",
+  NumpadSubtract: "numsub",
+  NumpadMultiply: "nummult",
+  NumpadDivide: "numdiv"
+};
+
+function acceleratorKeyForEvent(event: KeyboardEvent): string | null {
+  if (/^Key[A-Z]$/.test(event.code)) return event.code.slice(3);
+  if (/^Digit[0-9]$/.test(event.code)) return event.code.slice(5);
+  if (/^F(?:[1-9]|1[0-9]|2[0-4])$/.test(event.code)) return event.code;
+  if (/^Numpad[0-9]$/.test(event.code)) return `num${event.code.slice(6)}`;
+  return ACCELERATOR_KEYS_BY_CODE[event.code] ?? null;
+}
+
+function acceleratorForEvent(event: KeyboardEvent): string | null {
+  const key = acceleratorKeyForEvent(event);
+  if (!key) return null;
+
+  const modifiers: string[] = [];
+  if (event.getModifierState("AltGraph")) {
+    modifiers.push("AltGr");
+  } else {
+    if (event.metaKey) modifiers.push(process.platform === "darwin" ? "Command" : "Super");
+    if (event.ctrlKey) modifiers.push("Control");
+    if (event.altKey) modifiers.push("Alt");
+  }
+  if (event.shiftKey) modifiers.push("Shift");
+  return [...modifiers, key].join("+");
+}
+
+function displayAccelerator(accelerator: string): string {
+  if (!accelerator) return "Disabled";
+  const labels = accelerator.split("+").map((part) => {
+    if (process.platform === "darwin") {
+      if (["Command", "Cmd", "CommandOrControl", "CmdOrCtrl", "Super", "Meta"].includes(part)) return "⌘";
+      if (["Control", "Ctrl"].includes(part)) return "⌃";
+      if (["Alt", "Option"].includes(part)) return "⌥";
+      if (part === "Shift") return "⇧";
+    } else {
+      if (["Super", "Meta"].includes(part)) return "Win";
+      if (["Control", "Ctrl", "CommandOrControl", "CmdOrCtrl"].includes(part)) return "Ctrl";
+    }
+    return part === "Plus" ? "+" : part;
+  });
+  return labels.join(process.platform === "darwin" ? " " : " + ");
+}
+
 interface StickyNoteSettings {
   defaultFolder: string;
   defaultNoteColor: string;
@@ -118,6 +196,24 @@ export default class DesktopStickyNotesPlugin extends Plugin {
     }, 500);
   }
 
+  beginGlobalShortcutRecording(): void {
+    if (this.shortcutRegistrationTimer !== null) {
+      window.clearTimeout(this.shortcutRegistrationTimer);
+      this.shortcutRegistrationTimer = null;
+    }
+    this.unregisterGlobalToggleShortcut();
+  }
+
+  cancelGlobalShortcutRecording(): void {
+    this.registerGlobalToggleShortcut();
+  }
+
+  async setGlobalToggleShortcut(accelerator: string): Promise<void> {
+    this.settings.globalToggleShortcut = accelerator;
+    await this.saveSettings();
+    this.registerGlobalToggleShortcut(true);
+  }
+
   private registerGlobalToggleShortcut(showResult = false): void {
     this.unregisterGlobalToggleShortcut();
     const accelerator = this.settings.globalToggleShortcut.trim();
@@ -132,13 +228,13 @@ export default class DesktopStickyNotesPlugin extends Plugin {
       if (globalShortcut.isRegistered(accelerator)) globalShortcut.unregister(accelerator);
       const registered = globalShortcut.register(accelerator, () => void this.toggleTopLevelNote());
       if (!registered) {
-        new Notice(`Could not register global shortcut: ${accelerator}`);
+        new Notice(`Could not register global shortcut: ${displayAccelerator(accelerator)}`);
         return;
       }
       this.registeredGlobalShortcut = accelerator;
-      if (showResult) new Notice(`Global sticky-note shortcut: ${accelerator}`);
+      if (showResult) new Notice(`Global sticky-note shortcut: ${displayAccelerator(accelerator)}`);
     } catch {
-      new Notice(`Invalid global shortcut: ${accelerator}`);
+      new Notice(`Invalid global shortcut: ${displayAccelerator(accelerator)}`);
     }
   }
 
@@ -689,11 +785,14 @@ export default class DesktopStickyNotesPlugin extends Plugin {
 }
 
 class DesktopStickyNotesSettingTab extends PluginSettingTab {
+  private shortcutRecordingCleanup: (() => void) | null = null;
+
   constructor(app: PluginSettingTab["app"], private plugin: DesktopStickyNotesPlugin) {
     super(app, plugin);
   }
 
   display(): void {
+    this.stopShortcutRecording(true);
     const { containerEl } = this;
     containerEl.empty();
     containerEl.createEl("h2", { text: "Desktop Sticky Notes" });
@@ -719,17 +818,39 @@ class DesktopStickyNotesSettingTab extends PluginSettingTab {
           await this.plugin.saveSettings();
         }));
 
-    new Setting(containerEl)
+    const shortcutSetting = new Setting(containerEl)
       .setName("Global toggle shortcut")
-      .setDesc("System-wide shortcut for toggling the top-level sticky note. Leave blank to disable.")
-      .addText((text) => text
-        .setPlaceholder(DEFAULT_GLOBAL_SHORTCUT)
-        .setValue(this.plugin.settings.globalToggleShortcut)
-        .onChange(async (value) => {
-          this.plugin.settings.globalToggleShortcut = value.trim();
-          await this.plugin.saveSettings();
-          this.plugin.scheduleGlobalShortcutRegistration();
-        }));
+      .setDesc("System-wide shortcut for toggling the top-level sticky note. Click the shortcut, press a new combination, or press Escape to cancel.");
+    let recorderButton: HTMLButtonElement;
+    let clearButton: HTMLButtonElement;
+    shortcutSetting
+      .addButton((button) => {
+        button
+          .setButtonText(displayAccelerator(this.plugin.settings.globalToggleShortcut))
+          .setTooltip("Record global shortcut")
+          .setClass("desktop-sticky-note-shortcut-recorder")
+          .onClick(() => {
+            if (this.shortcutRecordingCleanup) {
+              this.stopShortcutRecording(true);
+            } else {
+              this.startShortcutRecording(recorderButton, clearButton);
+            }
+          });
+        recorderButton = button.buttonEl;
+      })
+      .addButton((button) => {
+        button
+          .setButtonText("Clear")
+          .setTooltip("Disable global shortcut")
+          .setDisabled(!this.plugin.settings.globalToggleShortcut)
+          .onClick(async () => {
+            this.stopShortcutRecording(false);
+            await this.plugin.setGlobalToggleShortcut("");
+            recorderButton.setText("Disabled");
+            clearButton.disabled = true;
+          });
+        clearButton = button.buttonEl;
+      });
 
     new Setting(containerEl)
       .setName("Top-level sticky note")
@@ -748,5 +869,67 @@ class DesktopStickyNotesSettingTab extends PluginSettingTab {
         .setIcon("trash")
         .setTooltip("Clear top-level note")
         .onClick(() => void this.plugin.setTopLevelNote(null).then(() => this.display())));
+  }
+
+  hide(): void {
+    this.stopShortcutRecording(true);
+    super.hide();
+  }
+
+  private startShortcutRecording(recorderButton: HTMLButtonElement, clearButton: HTMLButtonElement): void {
+    this.stopShortcutRecording(true);
+    this.plugin.beginGlobalShortcutRecording();
+    const previousLabel = displayAccelerator(this.plugin.settings.globalToggleShortcut);
+    recorderButton.setText("Press shortcut…");
+    recorderButton.addClass("is-recording");
+    clearButton.disabled = true;
+    recorderButton.focus();
+
+    const finish = (restoreRegistration: boolean) => {
+      const cleanup = this.shortcutRecordingCleanup;
+      this.shortcutRecordingCleanup = null;
+      cleanup?.();
+      recorderButton.removeClass("is-recording");
+      if (restoreRegistration) this.plugin.cancelGlobalShortcutRecording();
+    };
+    const onKeyDown = (event: KeyboardEvent) => {
+      event.preventDefault();
+      event.stopImmediatePropagation();
+      if (event.repeat) return;
+      if (event.key === "Escape") {
+        finish(true);
+        recorderButton.setText(previousLabel);
+        clearButton.disabled = !this.plugin.settings.globalToggleShortcut;
+        return;
+      }
+      const accelerator = acceleratorForEvent(event);
+      if (!accelerator) return;
+
+      finish(false);
+      recorderButton.setText(displayAccelerator(accelerator));
+      clearButton.disabled = false;
+      void this.plugin.setGlobalToggleShortcut(accelerator);
+    };
+    const onPointerDown = (event: PointerEvent) => {
+      if (event.target === recorderButton || recorderButton.contains(event.target as Node)) return;
+      finish(true);
+      recorderButton.setText(previousLabel);
+      clearButton.disabled = !this.plugin.settings.globalToggleShortcut;
+    };
+    const document = recorderButton.ownerDocument;
+    document.addEventListener("keydown", onKeyDown, true);
+    document.addEventListener("pointerdown", onPointerDown, true);
+    this.shortcutRecordingCleanup = () => {
+      document.removeEventListener("keydown", onKeyDown, true);
+      document.removeEventListener("pointerdown", onPointerDown, true);
+    };
+  }
+
+  private stopShortcutRecording(restoreRegistration: boolean): void {
+    if (!this.shortcutRecordingCleanup) return;
+    const cleanup = this.shortcutRecordingCleanup;
+    this.shortcutRecordingCleanup = null;
+    cleanup();
+    if (restoreRegistration) this.plugin.cancelGlobalShortcutRecording();
   }
 }
