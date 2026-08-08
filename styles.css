@@ -1,6 +1,6 @@
 body.desktop-sticky-note {
   --sticky-note-background: #fff3a3;
-  background: var(--sticky-note-background) !important;
+  background: var(--sticky-note-background);
 }
 
 body.desktop-sticky-note .app-container,
@@ -14,7 +14,7 @@ body.desktop-sticky-note .view-content,
 body.desktop-sticky-note .markdown-reading-view,
 body.desktop-sticky-note .markdown-source-view,
 body.desktop-sticky-note .cm-editor {
-  background: var(--sticky-note-background) !important;
+  background: var(--sticky-note-background);
 }
 
 body.desktop-sticky-note .workspace-tab-header-container,
@@ -30,7 +30,7 @@ body.desktop-sticky-note .view-header {
 /* Sticky notes use their own Hide action, so the frameless window controls
    would be redundant and can overlap the note toolbar. */
 body.desktop-sticky-note .titlebar-button-container.mod-right {
-  display: none !important;
+  display: none;
 }
 
 body.desktop-sticky-note .view-header .view-actions,

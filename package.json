@@ -1,8 +1,8 @@
 {
   "name": "desktop-sticky-notes",
-  "version": "1.0.1",
+  "version": "1.0.2",
   "private": true,
-  "description": "An Obsidian desktop sticky-notes plugin.",
+  "description": "A desktop sticky-notes plugin.",
   "license": "MIT",
   "scripts": {
     "build": "node esbuild.config.mjs",
