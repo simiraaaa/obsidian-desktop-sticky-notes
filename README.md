@@ -29,6 +29,10 @@ Copy `manifest.json`, `main.js`, and `styles.css` into:
 
 Then enable **Desktop Sticky Notes** under Obsidian's community-plugin settings. This plugin requires the desktop version of Obsidian.
 
+## Permissions and privacy
+
+Desktop Sticky Notes uses Obsidian's Electron APIs to manage popout windows and register the optional system-wide shortcut. It only creates or edits Markdown files inside your vault through the Obsidian API. It does not access files outside the vault, make network requests, collect telemetry, or send data anywhere.
+
 ## License
 
 Desktop Sticky Notes is available under the [MIT License](LICENSE).

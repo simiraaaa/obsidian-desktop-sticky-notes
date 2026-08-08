@@ -1,7 +1,7 @@
 {
   "id": "desktop-sticky-notes",
   "name": "Desktop Sticky Notes",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "minAppVersion": "1.5.0",
   "description": "Resizable, file-backed sticky notes in always-on-top Obsidian windows.",
   "author": "Newel",

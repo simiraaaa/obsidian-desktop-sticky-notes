@@ -1,4 +1,5 @@
-import { MarkdownView, Notice, Plugin, PluginSettingTab, Setting, TAbstractFile, TFile, WorkspaceLeaf, setIcon, setTooltip } from "obsidian";
+import { MarkdownView, Notice, Platform, Plugin, PluginSettingTab, Setting, TAbstractFile, TFile, WorkspaceLeaf, normalizePath, setIcon, setTooltip } from "obsidian";
+import type { SettingDefinitionItem } from "obsidian";
 import { BrowserWindow, globalShortcut, screen } from "@electron/remote";
 
 const DEFAULT_COLOR = "#fff3a3";
@@ -6,7 +7,7 @@ const DEFAULT_WIDTH = 360;
 const DEFAULT_HEIGHT = 360;
 const WINDOW_NAME_PREFIX = "desktop-sticky-notes:";
 const LEGACY_DEFAULT_GLOBAL_SHORTCUT = "CommandOrControl+Alt+N";
-const DEFAULT_GLOBAL_SHORTCUT = process.platform === "darwin" ? "Option+F10" : "Super+F10";
+const DEFAULT_GLOBAL_SHORTCUT = Platform.isMacOS ? "Option+F10" : "Super+F10";
 
 const ACCELERATOR_KEYS_BY_CODE: Record<string, string> = {
   Space: "Space",
@@ -61,7 +62,7 @@ function acceleratorForEvent(event: KeyboardEvent): string | null {
   if (event.getModifierState("AltGraph")) {
     modifiers.push("AltGr");
   } else {
-    if (event.metaKey) modifiers.push(process.platform === "darwin" ? "Command" : "Super");
+    if (event.metaKey) modifiers.push(Platform.isMacOS ? "Command" : "Super");
     if (event.ctrlKey) modifiers.push("Control");
     if (event.altKey) modifiers.push("Alt");
   }
@@ -72,7 +73,7 @@ function acceleratorForEvent(event: KeyboardEvent): string | null {
 function displayAccelerator(accelerator: string): string {
   if (!accelerator) return "Disabled";
   const labels = accelerator.split("+").map((part) => {
-    if (process.platform === "darwin") {
+    if (Platform.isMacOS) {
       if (["Command", "Cmd", "CommandOrControl", "CmdOrCtrl", "Super", "Meta"].includes(part)) return "⌘";
       if (["Control", "Ctrl"].includes(part)) return "⌃";
       if (["Alt", "Option"].includes(part)) return "⌥";
@@ -83,7 +84,7 @@ function displayAccelerator(accelerator: string): string {
     }
     return part === "Plus" ? "+" : part;
   });
-  return labels.join(process.platform === "darwin" ? " " : " + ");
+  return labels.join(Platform.isMacOS ? " " : " + ");
 }
 
 interface StickyNoteSettings {
@@ -136,9 +137,6 @@ interface NativeBrowserWindow {
   close(): void;
   destroy(): void;
   getPosition(): [number, number];
-  webContents: {
-    executeJavaScript(source: string): Promise<unknown>;
-  };
 }
 
 export default class DesktopStickyNotesPlugin extends Plugin {
@@ -151,7 +149,7 @@ export default class DesktopStickyNotesPlugin extends Plugin {
 
   async onload(): Promise<void> {
     await this.loadSettings();
-    await this.closeStaleStickyWindows();
+    this.closeStaleStickyWindows();
     this.addSettingTab(new DesktopStickyNotesSettingTab(this.app, this));
     this.registerCommands();
     this.registerFileLifecycle();
@@ -361,7 +359,7 @@ export default class DesktopStickyNotesPlugin extends Plugin {
       await this.saveSettings();
       return;
     }
-    const nativeWindows = await this.nativeNoteWindowsForPath(path);
+    const nativeWindows = this.nativeNoteWindowsForPath(path);
     const trackedWindows = [...(this.notesByPath.get(path) ?? [])]
       .map((note) => note.window)
       .filter((window) => !window.isDestroyed());
@@ -688,21 +686,13 @@ export default class DesktopStickyNotesPlugin extends Plugin {
     }, 50);
   }
 
-  private async closeStaleStickyWindows(): Promise<void> {
+  private closeStaleStickyWindows(): void {
     const windows = BrowserWindow.getAllWindows() as unknown as NativeBrowserWindow[];
     for (const candidate of windows) {
       if (candidate.isDestroyed()) continue;
-      let isStickyWindow = candidate.getTitle().startsWith("Sticky note —");
-      if (!isStickyWindow) {
-        try {
-          isStickyWindow = await candidate.webContents.executeJavaScript(
-            `window.name.startsWith('${WINDOW_NAME_PREFIX}')`
-          ) === true;
-        } catch {
-          // A renderer can disappear while startup cleanup is running.
-        }
+      if (candidate.getTitle().startsWith("Sticky note —") && !candidate.isDestroyed()) {
+        candidate.destroy();
       }
-      if (isStickyWindow && !candidate.isDestroyed()) candidate.destroy();
     }
     void this.app.workspace.requestSaveLayout();
   }
@@ -720,21 +710,10 @@ export default class DesktopStickyNotesPlugin extends Plugin {
     return stickyLeaves;
   }
 
-  private async nativeNoteWindowsForPath(path: string): Promise<NativeBrowserWindow[]> {
-    const matches: NativeBrowserWindow[] = [];
-    for (const candidate of BrowserWindow.getAllWindows() as unknown as NativeBrowserWindow[]) {
-      if (candidate.isDestroyed()) continue;
-      try {
-        const markedPath = await candidate.webContents.executeJavaScript(
-          `window.name.startsWith('${WINDOW_NAME_PREFIX}') `
-            + `? decodeURIComponent(window.name.slice(${WINDOW_NAME_PREFIX.length})) : null`
-        );
-        if (markedPath === path) matches.push(candidate);
-      } catch {
-        // A window can close while the command is inspecting it.
-      }
-    }
-    return matches;
+  private nativeNoteWindowsForPath(path: string): NativeBrowserWindow[] {
+    const expectedTitle = this.nativeNoteWindowTitleForPath(path);
+    return (BrowserWindow.getAllWindows() as unknown as NativeBrowserWindow[])
+      .filter((candidate) => !candidate.isDestroyed() && candidate.getTitle() === expectedTitle);
   }
 
   private rememberTopLevelPosition(note: StickyNoteWindow): void {
@@ -775,7 +754,8 @@ export default class DesktopStickyNotesPlugin extends Plugin {
   }
 
   private normalizeFolder(folder: string): string {
-    return folder.trim().replace(/^\/+|\/+$/g, "");
+    const trimmed = folder.trim().replace(/^\/+|\/+$/g, "");
+    return trimmed ? normalizePath(trimmed) : "";
   }
 
   private uniqueNoteName(): string {
@@ -791,39 +771,77 @@ class DesktopStickyNotesSettingTab extends PluginSettingTab {
     super(app, plugin);
   }
 
+  getSettingDefinitions(): SettingDefinitionItem[] {
+    return [
+      {
+        name: "Default folder",
+        desc: "Folder for newly created sticky notes. Leave blank for the vault root.",
+        render: (setting) => this.addDefaultFolderControl(setting)
+      },
+      {
+        name: "Default note color",
+        desc: "Background color used for notes that do not have a saved custom color.",
+        render: (setting) => this.addDefaultColorControl(setting)
+      },
+      {
+        name: "Global toggle shortcut",
+        desc: "System-wide shortcut for toggling the top-level sticky note. Click the shortcut, press a new combination, or press escape to cancel.",
+        render: (setting) => this.addGlobalShortcutControl(setting)
+      },
+      {
+        name: "Top-level sticky note",
+        desc: this.plugin.settings.topLevelNotePath ?? "No top-level note selected.",
+        render: (setting) => this.addTopLevelNoteControl(setting)
+      }
+    ];
+  }
+
   display(): void {
     this.stopShortcutRecording(true);
     const { containerEl } = this;
     containerEl.empty();
-    containerEl.createEl("h2", { text: "Desktop Sticky Notes" });
-
-    new Setting(containerEl)
+    this.addDefaultFolderControl(new Setting(containerEl)
       .setName("Default folder")
-      .setDesc("Folder for newly created sticky notes. Leave blank for the vault root.")
-      .addText((text) => text
-        .setPlaceholder("Vault root")
-        .setValue(this.plugin.settings.defaultFolder)
-        .onChange(async (value) => {
-          this.plugin.settings.defaultFolder = value.trim();
-          await this.plugin.saveSettings();
-        }));
-
-    new Setting(containerEl)
+      .setDesc("Folder for newly created sticky notes. Leave blank for the vault root."));
+    this.addDefaultColorControl(new Setting(containerEl)
       .setName("Default note color")
-      .setDesc("Background color used for notes that do not have a saved custom color.")
-      .addColorPicker((picker) => picker
-        .setValue(this.plugin.settings.defaultNoteColor)
-        .onChange(async (value) => {
-          this.plugin.settings.defaultNoteColor = value;
-          await this.plugin.saveSettings();
-        }));
-
-    const shortcutSetting = new Setting(containerEl)
+      .setDesc("Background color used for notes that do not have a saved custom color."));
+    this.addGlobalShortcutControl(new Setting(containerEl)
       .setName("Global toggle shortcut")
-      .setDesc("System-wide shortcut for toggling the top-level sticky note. Click the shortcut, press a new combination, or press Escape to cancel.");
+      .setDesc("System-wide shortcut for toggling the top-level sticky note. Click the shortcut, press a new combination, or press escape to cancel."));
+    this.addTopLevelNoteControl(new Setting(containerEl)
+      .setName("Top-level sticky note")
+      .setDesc(this.plugin.settings.topLevelNotePath ?? "No top-level note selected."));
+  }
+
+  hide(): void {
+    this.stopShortcutRecording(true);
+    super.hide();
+  }
+
+  private addDefaultFolderControl(setting: Setting): void {
+    setting.addText((text) => text
+      .setPlaceholder("Vault root")
+      .setValue(this.plugin.settings.defaultFolder)
+      .onChange(async (value) => {
+        this.plugin.settings.defaultFolder = value.trim();
+        await this.plugin.saveSettings();
+      }));
+  }
+
+  private addDefaultColorControl(setting: Setting): void {
+    setting.addColorPicker((picker) => picker
+      .setValue(this.plugin.settings.defaultNoteColor)
+      .onChange(async (value) => {
+        this.plugin.settings.defaultNoteColor = value;
+        await this.plugin.saveSettings();
+      }));
+  }
+
+  private addGlobalShortcutControl(setting: Setting): () => void {
     let recorderButton: HTMLButtonElement;
     let clearButton: HTMLButtonElement;
-    shortcutSetting
+    setting
       .addButton((button) => {
         button
           .setButtonText(displayAccelerator(this.plugin.settings.globalToggleShortcut))
@@ -848,32 +866,36 @@ class DesktopStickyNotesSettingTab extends PluginSettingTab {
             await this.plugin.setGlobalToggleShortcut("");
             recorderButton.setText("Disabled");
             clearButton.disabled = true;
-          });
+        });
         clearButton = button.buttonEl;
       });
+    return () => this.stopShortcutRecording(true);
+  }
 
-    new Setting(containerEl)
-      .setName("Top-level sticky note")
-      .setDesc(this.plugin.settings.topLevelNotePath ?? "No top-level note selected.")
-      .addButton((button) => button
-        .setButtonText("Use active file")
-        .onClick(() => {
-          const file = this.app.workspace.getActiveFile();
-          if (!file) {
-            new Notice("Open a Markdown file first.");
-            return;
-          }
-          void this.plugin.setTopLevelNote(file.path).then(() => this.display());
-        }))
+  private addTopLevelNoteControl(setting: Setting): void {
+    setting.addButton((button) => button
+      .setButtonText("Use active file")
+      .onClick(() => {
+        const file = this.app.workspace.getActiveFile();
+        if (!file) {
+          new Notice("Open a Markdown file first.");
+          return;
+        }
+        void this.plugin.setTopLevelNote(file.path).then(() => this.refresh());
+      }))
       .addExtraButton((button) => button
         .setIcon("trash")
         .setTooltip("Clear top-level note")
-        .onClick(() => void this.plugin.setTopLevelNote(null).then(() => this.display())));
+        .onClick(() => void this.plugin.setTopLevelNote(null).then(() => this.refresh())));
   }
 
-  hide(): void {
-    this.stopShortcutRecording(true);
-    super.hide();
+  private refresh(): void {
+    const update = (this as { update?: () => void }).update;
+    if (update) {
+      update.call(this);
+    } else {
+      (this as unknown as { display: () => void }).display();
+    }
   }
 
   private startShortcutRecording(recorderButton: HTMLButtonElement, clearButton: HTMLButtonElement): void {

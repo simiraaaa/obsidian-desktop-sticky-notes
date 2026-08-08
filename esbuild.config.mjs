@@ -10,7 +10,8 @@ const context = await esbuild.context({
   platform: "node",
   target: "es2022",
   external: ["obsidian", "electron"],
-  sourcemap: "inline",
+  minify: !watch,
+  sourcemap: watch ? "inline" : false,
   logLevel: "info"
 });
 
