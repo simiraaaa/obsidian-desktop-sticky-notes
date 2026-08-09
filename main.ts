@@ -7,7 +7,19 @@ const DEFAULT_WIDTH = 360;
 const DEFAULT_HEIGHT = 360;
 const WINDOW_NAME_PREFIX = "desktop-sticky-notes:";
 const LEGACY_DEFAULT_GLOBAL_SHORTCUT = "CommandOrControl+Alt+N";
-const DEFAULT_GLOBAL_SHORTCUT = Platform.isMacOS ? "Option+F10" : "Super+F10";
+
+type DesktopPlatform = "linux" | "macos" | "windows";
+
+const CURRENT_PLATFORM: DesktopPlatform = Platform.isMacOS ? "macos" : Platform.isWin ? "windows" : "linux";
+const DEFAULT_GLOBAL_SHORTCUTS: Record<DesktopPlatform, string> = {
+  linux: "Super+F10",
+  macos: "Option+F10",
+  windows: "Super+F10"
+};
+const KNOWN_DEFAULT_GLOBAL_SHORTCUTS = new Set([
+  LEGACY_DEFAULT_GLOBAL_SHORTCUT,
+  ...Object.values(DEFAULT_GLOBAL_SHORTCUTS)
+]);
 
 const ACCELERATOR_KEYS_BY_CODE: Record<string, string> = {
   Space: "Space",
@@ -87,28 +99,52 @@ function displayAccelerator(accelerator: string): string {
   return labels.join(Platform.isMacOS ? " " : " + ");
 }
 
+function normalizeAcceleratorForPlatform(accelerator: string): string {
+  if (KNOWN_DEFAULT_GLOBAL_SHORTCUTS.has(accelerator)) return DEFAULT_GLOBAL_SHORTCUTS[CURRENT_PLATFORM];
+
+  return accelerator.split("+").map((part) => {
+    if (CURRENT_PLATFORM === "macos") {
+      if (["Command", "Cmd", "CommandOrControl", "CmdOrCtrl", "Super", "Meta"].includes(part)) return "Command";
+      if (part === "Option") return "Alt";
+    } else {
+      if (["Command", "Cmd", "Super", "Meta"].includes(part)) return "Super";
+      if (["CommandOrControl", "CmdOrCtrl"].includes(part)) return "Control";
+      if (part === "Option") return "Alt";
+    }
+    return part;
+  }).join("+");
+}
+
 interface StickyNoteSettings {
   defaultFolder: string;
   defaultNoteColor: string;
-  globalToggleShortcut: string;
+  globalToggleShortcuts: Record<DesktopPlatform, string>;
   topLevelNotePath: string | null;
   topLevelWindowPosition: WindowPosition | null;
   colorsByPath: Record<string, string>;
 }
+
+type StoredStickyNoteSettings = Partial<Omit<StickyNoteSettings, "globalToggleShortcuts">> & {
+  globalToggleShortcut?: unknown;
+  globalToggleShortcuts?: Partial<Record<DesktopPlatform, unknown>>;
+  openNotePaths?: unknown;
+};
 
 interface WindowPosition {
   x: number;
   y: number;
 }
 
-const DEFAULT_SETTINGS: StickyNoteSettings = {
-  defaultFolder: "",
-  defaultNoteColor: DEFAULT_COLOR,
-  globalToggleShortcut: DEFAULT_GLOBAL_SHORTCUT,
-  topLevelNotePath: null,
-  topLevelWindowPosition: null,
-  colorsByPath: {}
-};
+function createDefaultSettings(): StickyNoteSettings {
+  return {
+    defaultFolder: "",
+    defaultNoteColor: DEFAULT_COLOR,
+    globalToggleShortcuts: { ...DEFAULT_GLOBAL_SHORTCUTS },
+    topLevelNotePath: null,
+    topLevelWindowPosition: null,
+    colorsByPath: {}
+  };
+}
 
 interface StickyNoteWindow {
   file: TFile;
@@ -140,7 +176,7 @@ interface NativeBrowserWindow {
 }
 
 export default class DesktopStickyNotesPlugin extends Plugin {
-  settings: StickyNoteSettings = DEFAULT_SETTINGS;
+  settings: StickyNoteSettings = createDefaultSettings();
   private notesByPath = new Map<string, Set<StickyNoteWindow>>();
   private initializedLeaves = new WeakSet<WorkspaceLeaf>();
   private registeredGlobalShortcut: string | null = null;
@@ -173,11 +209,31 @@ export default class DesktopStickyNotesPlugin extends Plugin {
   }
 
   async loadSettings(): Promise<void> {
-    const stored = await this.loadData() as Partial<StickyNoteSettings> & { openNotePaths?: unknown };
-    delete stored.openNotePaths;
-    this.settings = Object.assign({}, DEFAULT_SETTINGS, stored);
-    if (stored.globalToggleShortcut === LEGACY_DEFAULT_GLOBAL_SHORTCUT) {
-      this.settings.globalToggleShortcut = DEFAULT_GLOBAL_SHORTCUT;
+    const stored = (await this.loadData() ?? {}) as StoredStickyNoteSettings;
+    const defaults = createDefaultSettings();
+    const globalToggleShortcuts = { ...defaults.globalToggleShortcuts };
+    const storedShortcuts = stored.globalToggleShortcuts;
+
+    for (const platform of Object.keys(globalToggleShortcuts) as DesktopPlatform[]) {
+      const accelerator = storedShortcuts?.[platform];
+      if (typeof accelerator === "string") globalToggleShortcuts[platform] = accelerator;
+    }
+
+    const hasCurrentPlatformShortcut = Object.prototype.hasOwnProperty.call(storedShortcuts ?? {}, CURRENT_PLATFORM);
+    if (!hasCurrentPlatformShortcut && typeof stored.globalToggleShortcut === "string") {
+      globalToggleShortcuts[CURRENT_PLATFORM] = normalizeAcceleratorForPlatform(stored.globalToggleShortcut);
+    }
+
+    this.settings = {
+      defaultFolder: stored.defaultFolder ?? defaults.defaultFolder,
+      defaultNoteColor: stored.defaultNoteColor ?? defaults.defaultNoteColor,
+      globalToggleShortcuts,
+      topLevelNotePath: stored.topLevelNotePath ?? defaults.topLevelNotePath,
+      topLevelWindowPosition: stored.topLevelWindowPosition ?? defaults.topLevelWindowPosition,
+      colorsByPath: stored.colorsByPath ?? defaults.colorsByPath
+    };
+
+    if (Object.prototype.hasOwnProperty.call(stored, "globalToggleShortcut")) {
       await this.saveSettings();
     }
   }
@@ -207,14 +263,18 @@ export default class DesktopStickyNotesPlugin extends Plugin {
   }
 
   async setGlobalToggleShortcut(accelerator: string): Promise<void> {
-    this.settings.globalToggleShortcut = accelerator;
+    this.settings.globalToggleShortcuts[CURRENT_PLATFORM] = accelerator;
     await this.saveSettings();
     this.registerGlobalToggleShortcut(true);
   }
 
+  getGlobalToggleShortcut(): string {
+    return this.settings.globalToggleShortcuts[CURRENT_PLATFORM];
+  }
+
   private registerGlobalToggleShortcut(showResult = false): void {
     this.unregisterGlobalToggleShortcut();
-    const accelerator = this.settings.globalToggleShortcut.trim();
+    const accelerator = this.getGlobalToggleShortcut().trim();
     if (!accelerator) {
       if (showResult) new Notice("Global sticky-note shortcut disabled.");
       return;
@@ -844,7 +904,7 @@ class DesktopStickyNotesSettingTab extends PluginSettingTab {
     setting
       .addButton((button) => {
         button
-          .setButtonText(displayAccelerator(this.plugin.settings.globalToggleShortcut))
+          .setButtonText(displayAccelerator(this.plugin.getGlobalToggleShortcut()))
           .setTooltip("Record global shortcut")
           .setClass("desktop-sticky-note-shortcut-recorder")
           .onClick(() => {
@@ -860,7 +920,7 @@ class DesktopStickyNotesSettingTab extends PluginSettingTab {
         button
           .setButtonText("Clear")
           .setTooltip("Disable global shortcut")
-          .setDisabled(!this.plugin.settings.globalToggleShortcut)
+          .setDisabled(!this.plugin.getGlobalToggleShortcut())
           .onClick(async () => {
             this.stopShortcutRecording(false);
             await this.plugin.setGlobalToggleShortcut("");
@@ -901,7 +961,7 @@ class DesktopStickyNotesSettingTab extends PluginSettingTab {
   private startShortcutRecording(recorderButton: HTMLButtonElement, clearButton: HTMLButtonElement): void {
     this.stopShortcutRecording(true);
     this.plugin.beginGlobalShortcutRecording();
-    const previousLabel = displayAccelerator(this.plugin.settings.globalToggleShortcut);
+    const previousLabel = displayAccelerator(this.plugin.getGlobalToggleShortcut());
     recorderButton.setText("Press shortcut…");
     recorderButton.addClass("is-recording");
     clearButton.disabled = true;
@@ -921,7 +981,7 @@ class DesktopStickyNotesSettingTab extends PluginSettingTab {
       if (event.key === "Escape") {
         finish(true);
         recorderButton.setText(previousLabel);
-        clearButton.disabled = !this.plugin.settings.globalToggleShortcut;
+        clearButton.disabled = !this.plugin.getGlobalToggleShortcut();
         return;
       }
       const accelerator = acceleratorForEvent(event);
@@ -936,7 +996,7 @@ class DesktopStickyNotesSettingTab extends PluginSettingTab {
       if (event.target === recorderButton || recorderButton.contains(event.target as Node)) return;
       finish(true);
       recorderButton.setText(previousLabel);
-      clearButton.disabled = !this.plugin.settings.globalToggleShortcut;
+      clearButton.disabled = !this.plugin.getGlobalToggleShortcut();
     };
     const document = recorderButton.ownerDocument;
     document.addEventListener("keydown", onKeyDown, true);
