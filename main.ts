@@ -542,9 +542,10 @@ export default class DesktopStickyNotesPlugin extends Plugin {
     if (note.file.path === this.settings.topLevelNotePath) {
       // Only the globally toggled top-level note must be independent. This
       // prevents its native-only dismissal from activating Obsidian's main
-      // window when the shortcut was invoked over another application.
+      // window when the shortcut was invoked over another application. Keep it
+      // in the taskbar so it remains discoverable with other Obsidian windows.
       window.setParentWindow(null);
-      window.setSkipTaskbar(true);
+      window.setSkipTaskbar(false);
     } else {
       // Regular sticky notes retain Obsidian's normal window ownership and
       // taskbar grouping. This also repairs notes detached by earlier builds.
