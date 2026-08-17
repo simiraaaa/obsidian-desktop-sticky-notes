@@ -12,6 +12,9 @@ An Obsidian desktop-only plugin that opens real Markdown files in resizable stic
 
 Each sticky-note window has controls for keeping it above other applications, selecting a color, switching between edit and reading views, and hiding it. Window contents are the underlying Obsidian Markdown file, so edits and previews stay in sync with the vault.
 
+> [!NOTE]
+> On Linux, **Keep on top** works when Obsidian runs under X11 or XWayland. Electron does not support the required always-on-top window state under native Wayland, so the pin control cannot change window stacking in a native Wayland session.
+
 ## Settings
 
 - **Default notes folder** — where newly created sticky-note files are stored; defaults to the vault root.
