@@ -10,7 +10,7 @@ An Obsidian desktop-only plugin that opens real Markdown files in resizable stic
 - **Set current file as top-level sticky note** — designates the active Markdown file as the top-level note.
 - **Toggle top-level sticky note** — opens the designated note, brings it forward when it is behind another window, or hides it when it is already focused. It safely does nothing when no valid top-level file exists.
 
-Each sticky-note window has controls for keeping it on top, selecting a color, switching between edit and reading views, and hiding it. Window contents are the underlying Obsidian Markdown file, so edits and previews stay in sync with the vault.
+Each sticky-note window has controls for keeping it above other applications, selecting a color, switching between edit and reading views, and hiding it. Window contents are the underlying Obsidian Markdown file, so edits and previews stay in sync with the vault.
 
 ## Settings
 

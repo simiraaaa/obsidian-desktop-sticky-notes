@@ -539,20 +539,7 @@ export default class DesktopStickyNotesPlugin extends Plugin {
     document.body.classList.add("desktop-sticky-note");
     document.querySelector(".workspace-tab-header-container")?.remove();
     this.applyColor(note, this.noteColor(note.file.path), false);
-    if (note.file.path === this.settings.topLevelNotePath) {
-      // Only the globally toggled top-level note must be independent. This
-      // prevents its native-only dismissal from activating Obsidian's main
-      // window when the shortcut was invoked over another application. Keep it
-      // in the taskbar so it remains discoverable with other Obsidian windows.
-      window.setParentWindow(null);
-      window.setSkipTaskbar(false);
-    } else {
-      // Regular sticky notes retain Obsidian's normal window ownership and
-      // taskbar grouping. This also repairs notes detached by earlier builds.
-      window.setSkipTaskbar(false);
-      const mainWindow = this.nativeMainWindow();
-      if (mainWindow && mainWindow !== window) window.setParentWindow(mainWindow);
-    }
+    this.configureWindowOwnership(note);
     window.setResizable(true);
     this.addStickyActions(note);
     this.observePresentation(note);
@@ -628,7 +615,14 @@ export default class DesktopStickyNotesPlugin extends Plugin {
     actions?.empty();
 
     const pin = view.addAction("pin", "Keep on top", () => {
-      note.window.setAlwaysOnTop(!note.window.isAlwaysOnTop());
+      const pinned = !note.window.isAlwaysOnTop();
+      // A child window's stacking is constrained by its application parent on
+      // some window managers. Promote it to a native top-level window before
+      // enabling the OS-wide always-on-top state.
+      if (pinned) note.window.setParentWindow(null);
+      note.window.setAlwaysOnTop(pinned);
+      this.configureWindowOwnership(note);
+      if (pinned) note.window.moveTop();
       this.updatePinButton(pin, note.window.isAlwaysOnTop());
     });
     this.updatePinButton(pin, note.window.isAlwaysOnTop());
@@ -659,6 +653,19 @@ export default class DesktopStickyNotesPlugin extends Plugin {
   private updatePinButton(button: HTMLElement, pinned: boolean): void {
     setIcon(button, pinned ? "pin-off" : "pin");
     setTooltip(button, pinned ? "Stop keeping on top" : "Keep on top");
+  }
+
+  private configureWindowOwnership(note: StickyNoteWindow): void {
+    const { window } = note;
+    // Top-level and pinned notes must be independent native windows. A regular
+    // unpinned note returns to Obsidian ownership for normal window grouping.
+    if (note.file.path === this.settings.topLevelNotePath || window.isAlwaysOnTop()) {
+      window.setParentWindow(null);
+    } else {
+      const mainWindow = this.nativeMainWindow();
+      if (mainWindow && mainWindow !== window) window.setParentWindow(mainWindow);
+    }
+    window.setSkipTaskbar(false);
   }
 
   private updateModeButton(button: HTMLElement, mode: string): void {
