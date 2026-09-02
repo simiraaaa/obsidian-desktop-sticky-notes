@@ -761,7 +761,6 @@ export default class DesktopStickyNotesPlugin extends Plugin {
       // harmless where the resize was ignored outright.
       window.setContentSize(width, height);
       this.abandonCollapse(note);
-      new Notice("This window cannot be collapsed here.");
       return;
     }
     // A collapsed window must not be dragged to a new height, which would
@@ -771,10 +770,13 @@ export default class DesktopStickyNotesPlugin extends Plugin {
 
   private abandonCollapse(note: StickyNoteWindow): void {
     // Returns the note to the expanded state it never left. The window was not
-    // made fixed-size yet, so only the tracked state has to be undone.
+    // made fixed-size yet, so only the tracked state has to be undone. Both
+    // ways of failing to collapse report the same way: from the outside the
+    // window simply did not collapse.
     note.isCollapsed = false;
     delete note.expandedSize;
     this.applyCollapseClasses(note);
+    new Notice("Collapsing is not supported by this window manager.");
   }
 
   private expandNote(note: StickyNoteWindow): void {
