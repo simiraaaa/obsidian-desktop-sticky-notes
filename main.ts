@@ -726,16 +726,17 @@ export default class DesktopStickyNotesPlugin extends Plugin {
     if (window.isDestroyed() || note.isCollapsed) return;
     const [width, height] = window.getContentSize();
     note.expandedSize = { width, height };
+    note.isCollapsed = true;
+    // The collapsed styling is applied before the header is measured so that
+    // the measurement is the height the header will actually be drawn at: in an
+    // expanded window the note body can squeeze the header below that height.
+    this.applyCollapsedClass(note);
     // Resize first: a non-resizable window ignores size changes on some
     // platforms, so the window must still be resizable while it shrinks.
     window.setContentSize(width, this.collapsedHeight(note));
     // A collapsed window must not be dragged to a new height, which would
     // silently replace the height that expanding is supposed to restore.
     window.setResizable(false);
-    note.isCollapsed = true;
-    // Applied after the height is measured: styling keyed to this class may
-    // change the header, and the collapsed window must fit the header it had.
-    this.applyCollapsedClass(note);
   }
 
   private expandNote(note: StickyNoteWindow): void {
