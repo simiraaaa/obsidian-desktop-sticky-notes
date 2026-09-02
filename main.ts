@@ -736,9 +736,20 @@ export default class DesktopStickyNotesPlugin extends Plugin {
     // the measurement is the height the header will actually be drawn at: in an
     // expanded window the note body can squeeze the header below that height.
     this.applyCollapseClasses(note);
+    const collapsedHeight = this.collapsedHeight(note) ?? FALLBACK_COLLAPSED_HEIGHT;
     // Resize first: a non-resizable window ignores size changes on some
     // platforms, so the window must still be resizable while it shrinks.
-    window.setContentSize(width, this.collapsedHeight(note) ?? FALLBACK_COLLAPSED_HEIGHT);
+    window.setContentSize(width, collapsedHeight);
+    // Programmatic resizing is not honored everywhere, notably under native
+    // Wayland, so the new size is read back before the note is committed to a
+    // collapsed state its window never entered.
+    if (!this.contentHeightReached(window, collapsedHeight)) {
+      note.isCollapsed = false;
+      delete note.expandedSize;
+      this.applyCollapseClasses(note);
+      new Notice("This window cannot be collapsed here.");
+      return;
+    }
     // A collapsed window must not be dragged to a new height, which would
     // silently replace the height that expanding is supposed to restore.
     window.setResizable(false);
@@ -780,7 +791,18 @@ export default class DesktopStickyNotesPlugin extends Plugin {
     // on some platforms, so the window is resizable while it is resized.
     window.setResizable(true);
     window.setContentSize(width, collapsedHeight);
+    // Read back as in collapseNote(): where the resize is ignored the window
+    // stays resizable rather than being locked at a height it never took, and
+    // this refresh gives up instead of retrying.
+    if (!this.contentHeightReached(window, collapsedHeight)) return;
     window.setResizable(false);
+  }
+
+  private contentHeightReached(window: NativeBrowserWindow, expectedHeight: number): boolean {
+    // A window manager may round the requested size, so an exact match is not
+    // required; a window that ignored the request stays at its old height.
+    const [, height] = window.getContentSize();
+    return Math.abs(height - expectedHeight) <= 1;
   }
 
   private collapsedHeight(note: StickyNoteWindow): number | null {
