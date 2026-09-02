@@ -756,6 +756,10 @@ export default class DesktopStickyNotesPlugin extends Plugin {
     // Wayland, so the new size is read back before the note is committed to a
     // collapsed state its window never entered.
     if (!this.contentHeightReached(window, collapsedHeight)) {
+      // A window manager may clamp the request and apply part of it, so the
+      // window is put back before the recorded size is dropped. Restoring is
+      // harmless where the resize was ignored outright.
+      window.setContentSize(width, height);
       this.abandonCollapse(note);
       new Notice("This window cannot be collapsed here.");
       return;
