@@ -40,6 +40,10 @@ body.desktop-sticky-note .view-header input {
   -webkit-app-region: no-drag;
 }
 
+body.desktop-sticky-note .view-actions .desktop-sticky-note-collapse {
+  order: -1000;
+}
+
 body.desktop-sticky-note .view-actions .desktop-sticky-note-hide {
   order: 999;
   margin-left: auto;

@@ -569,7 +569,7 @@ export default class DesktopStickyNotesPlugin extends Plugin {
     document.querySelector(".workspace-tab-header-container")?.remove();
     this.applyColor(note, this.noteColor(note.file.path), false);
     this.configureWindowOwnership(note);
-    window.setResizable(true);
+    window.setResizable(!note.isCollapsed);
     this.addStickyActions(note);
     this.observePresentation(note);
   }
@@ -654,6 +654,14 @@ export default class DesktopStickyNotesPlugin extends Plugin {
     }
     actions.empty();
 
+    if (this.settings.enableCollapsibleNotes) {
+      const collapse = view.addAction("chevron-down", "Collapse sticky note", () => this.toggleCollapsed(note));
+      collapse.addClass("desktop-sticky-note-collapse");
+      // Actions are rebuilt from scratch on every refresh, so the icon comes
+      // from the tracked state rather than from the button being replaced.
+      this.updateCollapseButton(collapse, note.isCollapsed === true);
+    }
+
     const pin = view.addAction("pin", "Keep on top", () => {
       const pinned = !note.window.isAlwaysOnTop();
       // A child window's stacking is constrained by its application parent on
@@ -731,6 +739,11 @@ export default class DesktopStickyNotesPlugin extends Plugin {
     const header = note.document.querySelector(".view-header");
     const headerBottom = header ? Math.ceil(header.getBoundingClientRect().bottom) : 0;
     return headerBottom > 0 ? headerBottom : FALLBACK_COLLAPSED_HEIGHT;
+  }
+
+  private updateCollapseButton(button: HTMLElement, collapsed: boolean): void {
+    setIcon(button, collapsed ? "chevron-right" : "chevron-down");
+    setTooltip(button, collapsed ? "Expand sticky note" : "Collapse sticky note");
   }
 
   // One predicate for both the observer and the refresh: a bar is complete
