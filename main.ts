@@ -190,8 +190,8 @@ interface NativeBrowserWindow {
   close(): void;
   destroy(): void;
   getPosition(): [number, number];
-  getSize(): [number, number];
-  setSize(width: number, height: number): void;
+  getContentSize(): [number, number];
+  setContentSize(width: number, height: number): void;
 }
 
 export default class DesktopStickyNotesPlugin extends Plugin {
@@ -714,11 +714,11 @@ export default class DesktopStickyNotesPlugin extends Plugin {
   private collapseNote(note: StickyNoteWindow): void {
     const { window } = note;
     if (window.isDestroyed() || note.isCollapsed) return;
-    const [width, height] = window.getSize();
+    const [width, height] = window.getContentSize();
     note.expandedSize = { width, height };
     // Resize first: a non-resizable window ignores size changes on some
     // platforms, so the window must still be resizable while it shrinks.
-    window.setSize(width, this.collapsedHeight(note));
+    window.setContentSize(width, this.collapsedHeight(note));
     // A collapsed window must not be dragged to a new height, which would
     // silently replace the height that expanding is supposed to restore.
     window.setResizable(false);
@@ -730,7 +730,7 @@ export default class DesktopStickyNotesPlugin extends Plugin {
     if (window.isDestroyed() || !note.isCollapsed) return;
     const { width, height } = note.expandedSize ?? { width: DEFAULT_WIDTH, height: DEFAULT_HEIGHT };
     window.setResizable(true);
-    window.setSize(width, height);
+    window.setContentSize(width, height);
     note.isCollapsed = false;
   }
 
@@ -738,9 +738,19 @@ export default class DesktopStickyNotesPlugin extends Plugin {
     // Collapsing leaves exactly the note header visible. The header is measured
     // instead of assumed so that a theme, a font size, or anything stacked
     // above the header changes the collapsed height with it.
+    // The measurement is in CSS pixels within the web contents, so it can only
+    // be applied to the content size: the full window size would additionally
+    // contain an OS title bar whenever Obsidian runs with a native frame.
     const header = note.document.querySelector(".view-header");
-    const headerBottom = header ? Math.ceil(header.getBoundingClientRect().bottom) : 0;
-    return headerBottom > 0 ? headerBottom : FALLBACK_COLLAPSED_HEIGHT;
+    const headerBottom = header?.getBoundingClientRect().bottom ?? 0;
+    if (headerBottom <= 0) return FALLBACK_COLLAPSED_HEIGHT;
+    // Content sizes are device-independent pixels, which match CSS pixels only
+    // at 100% zoom. The ratio between the two heights converts the measurement
+    // for any other zoom level.
+    const innerHeight = note.document.defaultView?.innerHeight ?? 0;
+    const [, contentHeight] = note.window.getContentSize();
+    const dipsPerCssPixel = innerHeight > 0 && contentHeight > 0 ? contentHeight / innerHeight : 1;
+    return Math.ceil(headerBottom * dipsPerCssPixel);
   }
 
   private updateCollapseButton(button: HTMLElement, collapsed: boolean): void {
