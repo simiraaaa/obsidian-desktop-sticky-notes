@@ -44,6 +44,13 @@ body.desktop-sticky-note .view-actions .desktop-sticky-note-collapse {
   order: -1000;
 }
 
+/* While collapsed the title is all that is left of the note, so it has to stay
+   readable even under themes that fade the header title out until hover. */
+body.desktop-sticky-note.desktop-sticky-note-collapsed .view-header .view-header-title-container {
+  display: flex;
+  opacity: 1;
+}
+
 body.desktop-sticky-note .view-actions .desktop-sticky-note-hide {
   order: 999;
   margin-left: auto;
