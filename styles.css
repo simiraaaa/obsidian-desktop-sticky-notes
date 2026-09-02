@@ -133,13 +133,6 @@ body.desktop-sticky-note.desktop-sticky-note-compact .view-header .view-header-t
   line-height: var(--header-height);
 }
 
-/* While collapsed the title is all that is left of the note, so it has to stay
-   readable even under themes that fade the header title out until hover. */
-body.desktop-sticky-note.desktop-sticky-note-compact.desktop-sticky-note-collapsed .view-header .view-header-title-container {
-  display: flex;
-  opacity: 1;
-}
-
 body.desktop-sticky-note.desktop-sticky-note-compact .desktop-sticky-note-color-picker {
   /* Even sizes only: at an odd size the 1px ring lands on half device pixels and
      renders thicker on some sides than others on Retina displays. */
