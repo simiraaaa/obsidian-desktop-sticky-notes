@@ -741,7 +741,9 @@ export default class DesktopStickyNotesPlugin extends Plugin {
     // The measurement is in CSS pixels within the web contents, so it can only
     // be applied to the content size: the full window size would additionally
     // contain an OS title bar whenever Obsidian runs with a native frame.
-    const header = note.document.querySelector(".view-header");
+    // Scoped to this note's own view: a popout can be split, and the header of
+    // another pane there says nothing about this note's height.
+    const header = note.leaf.view.containerEl.querySelector(".view-header");
     const headerBottom = header?.getBoundingClientRect().bottom ?? 0;
     if (headerBottom <= 0) return FALLBACK_COLLAPSED_HEIGHT;
     // Content sizes are device-independent pixels, which match CSS pixels only
