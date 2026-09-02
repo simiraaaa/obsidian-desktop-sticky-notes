@@ -75,7 +75,7 @@ body.desktop-sticky-note .desktop-sticky-note-color-picker::-webkit-color-swatch
 /* Compact header. Applied only when the "Header size" setting is not "default";
    prepareWindow() keeps these body classes in sync with the setting. */
 
-body.desktop-sticky-note-compact {
+body.desktop-sticky-note.desktop-sticky-note-compact {
   /* Retint both header background tokens rather than the header itself: the
      focused variant is applied by a more specific Obsidian rule that a plain
      background declaration here would lose to. */
@@ -83,17 +83,17 @@ body.desktop-sticky-note-compact {
   --file-header-background-focused: var(--sticky-note-background);
 }
 
-body.desktop-sticky-note-header-small {
+body.desktop-sticky-note.desktop-sticky-note-header-small {
   --header-height: 20px;
   --sticky-note-header-icon-size: 14px;
 }
 
-body.desktop-sticky-note-header-extra-small {
+body.desktop-sticky-note.desktop-sticky-note-header-extra-small {
   --header-height: 14px;
   --sticky-note-header-icon-size: 12px;
 }
 
-body.desktop-sticky-note-compact .view-header {
+body.desktop-sticky-note.desktop-sticky-note-compact .view-header {
   /* Obsidian derives .view-content's height from --header-height, so the header
      must be exactly that tall or the note body is offset by the difference. */
   height: var(--header-height);
@@ -103,23 +103,23 @@ body.desktop-sticky-note-compact .view-header {
   padding: 0 10px;
 }
 
-body.desktop-sticky-note-compact .view-header .view-header-title-container,
-body.desktop-sticky-note-compact .view-header .view-header-nav-buttons,
-body.desktop-sticky-note-compact .view-header .view-actions {
+body.desktop-sticky-note.desktop-sticky-note-compact .view-header .view-header-title-container,
+body.desktop-sticky-note.desktop-sticky-note-compact .view-header .view-header-nav-buttons,
+body.desktop-sticky-note.desktop-sticky-note-compact .view-header .view-actions {
   height: var(--header-height);
   padding-top: 0;
   padding-bottom: 0;
 }
 
-body.desktop-sticky-note-compact .view-header .view-header-nav-buttons {
+body.desktop-sticky-note.desktop-sticky-note-compact .view-header .view-header-nav-buttons {
   display: flex;
   align-items: center;
   gap: 2px;
   margin: 0;
 }
 
-body.desktop-sticky-note-compact .view-header .view-action,
-body.desktop-sticky-note-compact .view-header .clickable-icon {
+body.desktop-sticky-note.desktop-sticky-note-compact .view-header .view-action,
+body.desktop-sticky-note.desktop-sticky-note-compact .view-header .clickable-icon {
   height: var(--header-height);
   padding: 1px 2px;
   --icon-size: var(--sticky-note-header-icon-size);
@@ -128,21 +128,21 @@ body.desktop-sticky-note-compact .view-header .clickable-icon {
   -webkit-app-region: no-drag;
 }
 
-body.desktop-sticky-note-compact .view-header .view-header-title {
+body.desktop-sticky-note.desktop-sticky-note-compact .view-header .view-header-title {
   font-size: var(--font-ui-smaller);
   line-height: var(--header-height);
 }
 
 /* While collapsed the title is all that is left of the note, so it has to stay
    readable even under themes that fade the header title out until hover. */
-body.desktop-sticky-note-compact.desktop-sticky-note-collapsed .view-header .view-header-title-container {
+body.desktop-sticky-note.desktop-sticky-note-compact.desktop-sticky-note-collapsed .view-header .view-header-title-container {
   display: flex;
   opacity: 1;
 }
 
-body.desktop-sticky-note-compact .desktop-sticky-note-color-picker {
-  /* An odd size would land the 1px ring on half device pixels, which renders it
-     thicker on some sides than others on Retina displays. */
+body.desktop-sticky-note.desktop-sticky-note-compact .desktop-sticky-note-color-picker {
+  /* Even sizes only: at an odd size the 1px ring lands on half device pixels and
+     renders thicker on some sides than others on Retina displays. */
   width: var(--sticky-note-header-icon-size);
   height: var(--sticky-note-header-icon-size);
   margin: 0 2px;
@@ -151,12 +151,15 @@ body.desktop-sticky-note-compact .desktop-sticky-note-color-picker {
   --swatch-width: var(--sticky-note-header-icon-size);
   --swatch-height: var(--sticky-note-header-icon-size);
   --swatch-radius: 50%;
-  --swatch-shadow: none;
+  /* The ring goes through Obsidian's own variable rather than a box-shadow on
+     the swatch, so that its hover and focus rings still replace it. */
+  --swatch-shadow: inset 0 0 0 1px var(--background-modifier-border);
 }
 
-body.desktop-sticky-note-compact .desktop-sticky-note-color-picker::-webkit-color-swatch {
+body.desktop-sticky-note.desktop-sticky-note-compact .desktop-sticky-note-color-picker::-webkit-color-swatch {
+  /* Drops the border of the default appearance; --swatch-shadow draws the ring
+     instead so that Obsidian's hover and focus rings can replace it. */
   border: 0;
-  box-shadow: inset 0 0 0 1px var(--background-modifier-border);
 }
 
 .desktop-sticky-note-shortcut-recorder {
