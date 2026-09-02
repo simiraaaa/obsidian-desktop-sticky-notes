@@ -486,7 +486,16 @@ export default class DesktopStickyNotesPlugin extends Plugin {
     await this.saveSettings();
     // Turning the feature off removes the only control that can restore a
     // collapsed window, so no note may stay collapsed without it.
-    if (!enabled) for (const note of this.allNotes()) this.expandNote(note);
+    if (!enabled) {
+      for (const note of this.allNotes()) {
+        try {
+          this.expandNote(note);
+        } catch {
+          // The remote proxy becomes invalid as soon as a window closes. One
+          // unusable window must not leave the remaining notes collapsed.
+        }
+      }
+    }
     this.scheduleRefreshAllNotes();
   }
 
