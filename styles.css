@@ -81,6 +81,9 @@ body.desktop-sticky-note.desktop-sticky-note-compact {
      background declaration here would lose to. */
   --file-header-background: var(--sticky-note-background);
   --file-header-background-focused: var(--sticky-note-background);
+  /* The header's height includes its 1px bottom border, so its children have to
+     stop short of it to stay inside. */
+  --sticky-note-header-inner-height: calc(var(--header-height) - var(--border-width));
 }
 
 body.desktop-sticky-note.desktop-sticky-note-header-small {
@@ -106,7 +109,7 @@ body.desktop-sticky-note.desktop-sticky-note-compact .view-header {
 body.desktop-sticky-note.desktop-sticky-note-compact .view-header .view-header-title-container,
 body.desktop-sticky-note.desktop-sticky-note-compact .view-header .view-header-nav-buttons,
 body.desktop-sticky-note.desktop-sticky-note-compact .view-header .view-actions {
-  height: var(--header-height);
+  height: var(--sticky-note-header-inner-height);
   padding-top: 0;
   padding-bottom: 0;
 }
@@ -120,17 +123,16 @@ body.desktop-sticky-note.desktop-sticky-note-compact .view-header .view-header-n
 
 body.desktop-sticky-note.desktop-sticky-note-compact .view-header .view-action,
 body.desktop-sticky-note.desktop-sticky-note-compact .view-header .clickable-icon {
-  height: var(--header-height);
-  padding: 1px 2px;
+  height: var(--sticky-note-header-inner-height);
+  /* No vertical padding: at the extra-small size the button is only a pixel
+     taller than the icon it holds. */
+  padding: 0 2px;
   --icon-size: var(--sticky-note-header-icon-size);
-  /* The navigation buttons are divs, so the rule above that exempts buttons and
-     inputs from the drag region does not reach them. */
-  -webkit-app-region: no-drag;
 }
 
 body.desktop-sticky-note.desktop-sticky-note-compact .view-header .view-header-title {
   font-size: var(--font-ui-smaller);
-  line-height: var(--header-height);
+  line-height: var(--sticky-note-header-inner-height);
 }
 
 body.desktop-sticky-note.desktop-sticky-note-compact .desktop-sticky-note-color-picker {
