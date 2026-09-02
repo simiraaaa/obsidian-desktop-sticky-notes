@@ -576,8 +576,7 @@ export default class DesktopStickyNotesPlugin extends Plugin {
     document.title = nativeTitle;
     window.setTitle(nativeTitle);
     document.body.classList.add("desktop-sticky-note");
-    document.body.classList.toggle("desktop-sticky-note-collapsible", this.settings.enableCollapsibleNotes);
-    this.applyCollapsedClass(note);
+    this.applyCollapseClasses(note);
     document.querySelector(".workspace-tab-header-container")?.remove();
     this.applyColor(note, this.noteColor(note.file.path), false);
     this.configureWindowOwnership(note);
@@ -736,7 +735,7 @@ export default class DesktopStickyNotesPlugin extends Plugin {
     // The collapsed styling is applied before the header is measured so that
     // the measurement is the height the header will actually be drawn at: in an
     // expanded window the note body can squeeze the header below that height.
-    this.applyCollapsedClass(note);
+    this.applyCollapseClasses(note);
     // Resize first: a non-resizable window ignores size changes on some
     // platforms, so the window must still be resizable while it shrinks.
     window.setContentSize(width, this.collapsedHeight(note) ?? FALLBACK_COLLAPSED_HEIGHT);
@@ -754,14 +753,16 @@ export default class DesktopStickyNotesPlugin extends Plugin {
     window.setResizable(true);
     window.setContentSize(width, height);
     note.isCollapsed = false;
-    this.applyCollapsedClass(note);
+    this.applyCollapseClasses(note);
   }
 
-  private applyCollapsedClass(note: StickyNoteWindow): void {
-    // A one-way projection of note.isCollapsed for stylesheets to hook into.
-    // The class is never read back: Obsidian rebuilds this DOM, so the note
-    // object remains the only source of truth for the collapse state.
-    note.document.body.classList.toggle("desktop-sticky-note-collapsed", note.isCollapsed);
+  private applyCollapseClasses(note: StickyNoteWindow): void {
+    // A one-way projection of the setting and of note.isCollapsed for
+    // stylesheets to hook into. The classes are never read back: Obsidian
+    // rebuilds this DOM, so the plugin remains the only source of truth.
+    const { classList } = note.document.body;
+    classList.toggle("desktop-sticky-note-collapsible", this.settings.enableCollapsibleNotes);
+    classList.toggle("desktop-sticky-note-collapsed", note.isCollapsed);
   }
 
   private syncCollapsedHeight(note: StickyNoteWindow): void {
