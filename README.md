@@ -19,7 +19,7 @@ Each sticky-note window has controls for keeping it above other applications, se
 
 - **Default notes folder** — where newly created sticky-note files are stored; defaults to the vault root.
 - **Default note color** — the initial background color for notes without a saved custom color.
-- **Collapsible sticky notes** — adds a collapse control to every sticky-note window. Collapsing shrinks the window to its header, and expanding restores the height the window had before it was collapsed. Windows open expanded again after they are hidden or after Obsidian restarts. Off by default.
+- **Collapsible sticky notes** — adds a collapse control to every sticky-note window. Collapsing shrinks the window to its header, and expanding restores the height the window had before it was collapsed. Windows open expanded again after they are hidden or after Obsidian restarts. Off by default. A collapsed window carries the `desktop-sticky-note-collapsed` body class, so a CSS snippet can restyle it.
 - **Global toggle shortcut** — toggles the top-level sticky note even when Obsidian is in the background. Click the recorder and press the desired combination, or clear it to disable the shortcut. The default is `Win+F10` on Windows, `Super+F10` on Linux, and `Option+F10` on macOS. The plugin stores this setting separately for each operating system, so syncing a vault between computers does not translate one platform's shortcut into another platform's keys.
 - **Top-level note** — the Markdown file controlled by the toggle command and global shortcut.
 

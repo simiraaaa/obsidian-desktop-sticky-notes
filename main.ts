@@ -575,6 +575,7 @@ export default class DesktopStickyNotesPlugin extends Plugin {
     document.title = nativeTitle;
     window.setTitle(nativeTitle);
     document.body.classList.add("desktop-sticky-note");
+    this.applyCollapsedClass(note);
     document.querySelector(".workspace-tab-header-container")?.remove();
     this.applyColor(note, this.noteColor(note.file.path), false);
     this.configureWindowOwnership(note);
@@ -732,6 +733,9 @@ export default class DesktopStickyNotesPlugin extends Plugin {
     // silently replace the height that expanding is supposed to restore.
     window.setResizable(false);
     note.isCollapsed = true;
+    // Applied after the height is measured: styling keyed to this class may
+    // change the header, and the collapsed window must fit the header it had.
+    this.applyCollapsedClass(note);
   }
 
   private expandNote(note: StickyNoteWindow): void {
@@ -743,6 +747,14 @@ export default class DesktopStickyNotesPlugin extends Plugin {
     window.setResizable(true);
     window.setContentSize(width, height);
     note.isCollapsed = false;
+    this.applyCollapsedClass(note);
+  }
+
+  private applyCollapsedClass(note: StickyNoteWindow): void {
+    // A one-way projection of note.isCollapsed for stylesheets to hook into.
+    // The class is never read back: Obsidian rebuilds this DOM, so the note
+    // object remains the only source of truth for the collapse state.
+    note.document.body.classList.toggle("desktop-sticky-note-collapsed", note.isCollapsed);
   }
 
   private collapsedHeight(note: StickyNoteWindow): number {
