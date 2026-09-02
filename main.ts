@@ -854,6 +854,7 @@ export default class DesktopStickyNotesPlugin extends Plugin {
   private updateCollapseButton(button: HTMLElement, collapsed: boolean): void {
     setIcon(button, collapsed ? "chevron-right" : "chevron-down");
     setTooltip(button, collapsed ? "Expand sticky note" : "Collapse sticky note");
+    button.setAttribute("aria-expanded", String(!collapsed));
   }
 
   // One predicate for both the observer and the refresh: a bar is complete
