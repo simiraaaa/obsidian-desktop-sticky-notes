@@ -917,7 +917,7 @@ class DesktopStickyNotesSettingTab extends PluginSettingTab {
       },
       {
         name: "Header size",
-        desc: "Height of the sticky-note header. Small and extra small hide the macOS window buttons.",
+        desc: "Height of the sticky-note header. Small and extra small also hide the window buttons on macOS.",
         render: (setting) => this.addHeaderSizeControl(setting)
       },
       {
@@ -945,7 +945,7 @@ class DesktopStickyNotesSettingTab extends PluginSettingTab {
       .setDesc("Background color used for notes that do not have a saved custom color."));
     this.addHeaderSizeControl(new Setting(containerEl)
       .setName("Header size")
-      .setDesc("Height of the sticky-note header. Small and extra small hide the macOS window buttons."));
+      .setDesc("Height of the sticky-note header. Small and extra small also hide the window buttons on macOS."));
     this.addGlobalShortcutControl(new Setting(containerEl)
       .setName("Global toggle shortcut")
       .setDesc("System-wide shortcut for toggling the top-level sticky note. Click the shortcut, press a new combination, or press escape to cancel."));
