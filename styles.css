@@ -81,6 +81,12 @@ body.desktop-sticky-note.desktop-sticky-note-compact {
      background declaration here would lose to. */
   --file-header-background: var(--sticky-note-background);
   --file-header-background-focused: var(--sticky-note-background);
+  /* Obsidian derives these from --header-height and passes them to Electron's
+     setTrafficLightPosition, so shrinking the header would drag the macOS
+     window buttons into the corner on the frame styles that keep them. Pinned
+     back to the value they have at Obsidian's own 40px header. */
+  --traffic-lights-offset-x: 40px;
+  --traffic-lights-offset-y: 40px;
   /* The header's height includes its 1px bottom border, so its children have to
      stop short of it to stay inside. */
   --sticky-note-header-inner-height: calc(var(--header-height) - var(--border-width));
