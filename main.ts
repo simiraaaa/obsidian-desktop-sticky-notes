@@ -6,9 +6,6 @@ const DEFAULT_COLOR = "#fff3a3";
 const DEFAULT_WIDTH = 360;
 const DEFAULT_HEIGHT = 360;
 const WINDOW_NAME_PREFIX = "desktop-sticky-notes:";
-// Used only when the note header cannot be measured; roughly Obsidian's
-// default header height, which keeps the header controls reachable.
-const FALLBACK_COLLAPSED_HEIGHT = 40;
 const LEGACY_DEFAULT_GLOBAL_SHORTCUT = "CommandOrControl+Alt+N";
 
 type DesktopPlatform = "linux" | "macos" | "windows";
@@ -744,7 +741,14 @@ export default class DesktopStickyNotesPlugin extends Plugin {
     // the measurement is the height the header will actually be drawn at: in an
     // expanded window the note body can squeeze the header below that height.
     this.applyCollapseClasses(note);
-    const collapsedHeight = this.collapsedHeight(note) ?? FALLBACK_COLLAPSED_HEIGHT;
+    // Without a measurement there is no height to collapse to. Guessing one
+    // could hide part of the header, and the window would then be locked at a
+    // size its controls do not fit into.
+    const collapsedHeight = this.collapsedHeight(note);
+    if (collapsedHeight === null) {
+      this.abandonCollapse(note);
+      return;
+    }
     // Resize first: a non-resizable window ignores size changes on some
     // platforms, so the window must still be resizable while it shrinks.
     window.setContentSize(width, collapsedHeight);
@@ -752,15 +756,21 @@ export default class DesktopStickyNotesPlugin extends Plugin {
     // Wayland, so the new size is read back before the note is committed to a
     // collapsed state its window never entered.
     if (!this.contentHeightReached(window, collapsedHeight)) {
-      note.isCollapsed = false;
-      delete note.expandedSize;
-      this.applyCollapseClasses(note);
+      this.abandonCollapse(note);
       new Notice("This window cannot be collapsed here.");
       return;
     }
     // A collapsed window must not be dragged to a new height, which would
     // silently replace the height that expanding is supposed to restore.
     window.setResizable(false);
+  }
+
+  private abandonCollapse(note: StickyNoteWindow): void {
+    // Returns the note to the expanded state it never left. The window was not
+    // made fixed-size yet, so only the tracked state has to be undone.
+    note.isCollapsed = false;
+    delete note.expandedSize;
+    this.applyCollapseClasses(note);
   }
 
   private expandNote(note: StickyNoteWindow): void {
@@ -828,8 +838,8 @@ export default class DesktopStickyNotesPlugin extends Plugin {
     // another pane there says nothing about this note's height.
     const header = note.leaf.view.containerEl.querySelector(".view-header");
     const headerBottom = header?.getBoundingClientRect().bottom ?? 0;
-    // No usable measurement; the caller decides whether guessing a height is
-    // better than leaving the window as it is.
+    // No usable measurement. Both callers then leave the window as it is: a
+    // guessed height could cut off the header the collapsed window consists of.
     if (headerBottom <= 0) return null;
     // Content sizes are device-independent pixels, and the zoom factor is
     // exactly the conversion from the CSS pixels the header was measured in.
