@@ -490,6 +490,9 @@ export default class DesktopStickyNotesPlugin extends Plugin {
     if (!enabled) {
       for (const note of this.allNotes()) {
         try {
+          // Resizing is restored first so that it does not depend on the expand
+          // below: a window left at a fixed size has no control to unlock it.
+          if (!note.window.isDestroyed()) note.window.setResizable(true);
           this.expandNote(note);
         } catch {
           // The remote proxy becomes invalid as soon as a window closes. One
@@ -580,7 +583,10 @@ export default class DesktopStickyNotesPlugin extends Plugin {
     document.querySelector(".workspace-tab-header-container")?.remove();
     this.applyColor(note, this.noteColor(note.file.path), false);
     this.configureWindowOwnership(note);
-    if (note.isCollapsed) {
+    // The setting gates the collapsed branch as well: a note that is still
+    // collapsed after the feature was switched off has no control left to
+    // expand it, so its window must at least become resizable again.
+    if (note.isCollapsed && this.settings.enableCollapsibleNotes) {
       this.syncCollapsedHeight(note);
     } else {
       window.setResizable(true);
@@ -728,7 +734,9 @@ export default class DesktopStickyNotesPlugin extends Plugin {
 
   private collapseNote(note: StickyNoteWindow): void {
     const { window } = note;
-    if (window.isDestroyed() || note.isCollapsed) return;
+    // The setting is re-checked here because saving it is asynchronous: a
+    // button rendered before the change can still be clicked in the meantime.
+    if (window.isDestroyed() || note.isCollapsed || !this.settings.enableCollapsibleNotes) return;
     const [width, height] = window.getContentSize();
     note.expandedSize = { width, height };
     note.isCollapsed = true;
@@ -761,10 +769,14 @@ export default class DesktopStickyNotesPlugin extends Plugin {
     // one is an inconsistent state rather than a case to guess a size for.
     if (window.isDestroyed() || !note.isCollapsed || !note.expandedSize) return;
     const { width, height } = note.expandedSize;
-    window.setResizable(true);
-    window.setContentSize(width, height);
+    // The note is moved to the expanded state before the window is touched. A
+    // remote call that throws would otherwise leave a note reporting itself
+    // collapsed while nothing on screen can expand it again.
+    delete note.expandedSize;
     note.isCollapsed = false;
     this.applyCollapseClasses(note);
+    window.setResizable(true);
+    window.setContentSize(width, height);
   }
 
   private applyCollapseClasses(note: StickyNoteWindow): void {
