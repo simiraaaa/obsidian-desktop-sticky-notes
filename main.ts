@@ -115,16 +115,35 @@ function normalizeAcceleratorForPlatform(accelerator: string): string {
   }).join("+");
 }
 
+type HeaderSize = "default" | "extra-small" | "small";
+
+// "default" maps to no class so that the default appearance stays exactly the
+// stock Obsidian header, with no plugin rule participating in the cascade.
+const HEADER_SIZE_CLASSES: Record<HeaderSize, string | null> = {
+  "default": null,
+  "small": "desktop-sticky-note-header-small",
+  "extra-small": "desktop-sticky-note-header-extra-small"
+};
+const COMPACT_HEADER_CLASS = "desktop-sticky-note-compact";
+
+function isHeaderSize(value: unknown): value is HeaderSize {
+  return typeof value === "string" && Object.prototype.hasOwnProperty.call(HEADER_SIZE_CLASSES, value);
+}
+
 interface StickyNoteSettings {
   defaultFolder: string;
   defaultNoteColor: string;
+  headerSize: HeaderSize;
   globalToggleShortcuts: Record<DesktopPlatform, string>;
   topLevelNotePath: string | null;
   topLevelWindowPosition: WindowPosition | null;
   colorsByPath: Record<string, string>;
 }
 
-type StoredStickyNoteSettings = Partial<Omit<StickyNoteSettings, "globalToggleShortcuts">> & {
+type StoredStickyNoteSettings = Partial<Omit<StickyNoteSettings, "globalToggleShortcuts" | "headerSize">> & {
+  // Saved data is user-editable, so a stored header size cannot be trusted to
+  // be one of the known values.
+  headerSize?: unknown;
   globalToggleShortcut?: unknown;
   globalToggleShortcuts?: Partial<Record<DesktopPlatform, unknown>>;
   openNotePaths?: unknown;
@@ -139,6 +158,7 @@ function createDefaultSettings(): StickyNoteSettings {
   return {
     defaultFolder: "",
     defaultNoteColor: DEFAULT_COLOR,
+    headerSize: "default",
     globalToggleShortcuts: { ...DEFAULT_GLOBAL_SHORTCUTS },
     topLevelNotePath: null,
     topLevelWindowPosition: null,
@@ -173,6 +193,7 @@ interface NativeBrowserWindow {
   close(): void;
   destroy(): void;
   getPosition(): [number, number];
+  setWindowButtonVisibility(visible: boolean): void;
 }
 
 export default class DesktopStickyNotesPlugin extends Plugin {
@@ -200,6 +221,8 @@ export default class DesktopStickyNotesPlugin extends Plugin {
     this.unregisterGlobalToggleShortcut();
     for (const note of [...this.allNotes()]) {
       this.rememberTopLevelPosition(note);
+      // Restore the traffic lights in case the window outlives the close below.
+      this.setTrafficLightsVisible(note, true);
       note.observer?.disconnect();
       note.leaf.detach();
       this.forceCloseWindow(note.window);
@@ -227,6 +250,7 @@ export default class DesktopStickyNotesPlugin extends Plugin {
     this.settings = {
       defaultFolder: stored.defaultFolder ?? defaults.defaultFolder,
       defaultNoteColor: stored.defaultNoteColor ?? defaults.defaultNoteColor,
+      headerSize: isHeaderSize(stored.headerSize) ? stored.headerSize : defaults.headerSize,
       globalToggleShortcuts,
       topLevelNotePath: stored.topLevelNotePath ?? defaults.topLevelNotePath,
       topLevelWindowPosition: stored.topLevelWindowPosition ?? defaults.topLevelWindowPosition,
@@ -539,10 +563,35 @@ export default class DesktopStickyNotesPlugin extends Plugin {
     document.body.classList.add("desktop-sticky-note");
     document.querySelector(".workspace-tab-header-container")?.remove();
     this.applyColor(note, this.noteColor(note.file.path), false);
+    this.applyHeaderSize(note);
     this.configureWindowOwnership(note);
     window.setResizable(true);
     this.addStickyActions(note);
     this.observePresentation(note);
+  }
+
+  // Obsidian rebuilds parts of a popout on focus and layout changes, so the
+  // classes that drive the compact stylesheet are re-synced on every pass
+  // instead of being applied once when the window is created.
+  private applyHeaderSize(note: StickyNoteWindow): void {
+    const size = this.settings.headerSize;
+    const { classList } = note.document.body;
+    classList.toggle(COMPACT_HEADER_CLASS, size !== "default");
+    for (const [candidate, className] of Object.entries(HEADER_SIZE_CLASSES)) {
+      if (className) classList.toggle(className, candidate === size);
+    }
+    this.setTrafficLightsVisible(note, size === "default");
+  }
+
+  private setTrafficLightsVisible(note: StickyNoteWindow, visible: boolean): void {
+    // setWindowButtonVisibility only exists on macOS.
+    if (CURRENT_PLATFORM !== "macos") return;
+    // With Obsidian's window frame style set to "native" the traffic lights sit
+    // in a real title bar above the note, where hiding them would leave the
+    // window with no close control and no compact header to replace it.
+    if (!note.document.body.classList.contains("is-hidden-frameless")) return;
+    if (note.window.isDestroyed()) return;
+    note.window.setWindowButtonVisibility(visible);
   }
 
   private watchWindow(note: StickyNoteWindow, domWindow: Window): void {
@@ -558,7 +607,7 @@ export default class DesktopStickyNotesPlugin extends Plugin {
     window.setTimeout(() => this.prepareWindow(note), 75);
   }
 
-  private scheduleRefreshAllNotes(): void {
+  scheduleRefreshAllNotes(): void {
     for (const note of this.allNotes()) this.scheduleRefreshNote(note);
   }
 
@@ -852,6 +901,11 @@ class DesktopStickyNotesSettingTab extends PluginSettingTab {
         render: (setting) => this.addDefaultColorControl(setting)
       },
       {
+        name: "Header size",
+        desc: "Height of the sticky-note header. Small and extra small hide the macOS window buttons.",
+        render: (setting) => this.addHeaderSizeControl(setting)
+      },
+      {
         name: "Global toggle shortcut",
         desc: "System-wide shortcut for toggling the top-level sticky note. Click the shortcut, press a new combination, or press escape to cancel.",
         render: (setting) => this.addGlobalShortcutControl(setting)
@@ -874,6 +928,9 @@ class DesktopStickyNotesSettingTab extends PluginSettingTab {
     this.addDefaultColorControl(new Setting(containerEl)
       .setName("Default note color")
       .setDesc("Background color used for notes that do not have a saved custom color."));
+    this.addHeaderSizeControl(new Setting(containerEl)
+      .setName("Header size")
+      .setDesc("Height of the sticky-note header. Small and extra small hide the macOS window buttons."));
     this.addGlobalShortcutControl(new Setting(containerEl)
       .setName("Global toggle shortcut")
       .setDesc("System-wide shortcut for toggling the top-level sticky note. Click the shortcut, press a new combination, or press escape to cancel."));
@@ -903,6 +960,22 @@ class DesktopStickyNotesSettingTab extends PluginSettingTab {
       .onChange(async (value) => {
         this.plugin.settings.defaultNoteColor = value;
         await this.plugin.saveSettings();
+      }));
+  }
+
+  private addHeaderSizeControl(setting: Setting): void {
+    setting.addDropdown((dropdown) => dropdown
+      .addOption("default", "Default")
+      .addOption("small", "Small")
+      .addOption("extra-small", "Extra small")
+      .setValue(this.plugin.settings.headerSize)
+      .onChange(async (value) => {
+        if (!isHeaderSize(value)) return;
+        this.plugin.settings.headerSize = value;
+        await this.plugin.saveSettings();
+        // Open notes only pick the header size up from prepareWindow(), which
+        // otherwise runs no earlier than the next focus change.
+        this.plugin.scheduleRefreshAllNotes();
       }));
   }
 
