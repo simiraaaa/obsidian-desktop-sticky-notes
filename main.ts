@@ -222,7 +222,7 @@ export default class DesktopStickyNotesPlugin extends Plugin {
     for (const note of [...this.allNotes()]) {
       this.rememberTopLevelPosition(note);
       // Restore the traffic lights in case the window outlives the close below.
-      this.setTrafficLightsVisible(note, true);
+      if (this.settings.headerSize !== "default") this.setTrafficLightsVisible(note, true);
       note.observer?.disconnect();
       note.leaf.detach();
       this.forceCloseWindow(note.window);
@@ -485,6 +485,19 @@ export default class DesktopStickyNotesPlugin extends Plugin {
     nativeWindow.focus();
   }
 
+  async setHeaderSize(size: HeaderSize): Promise<void> {
+    const previous = this.settings.headerSize;
+    if (size === previous) return;
+    this.settings.headerSize = size;
+    await this.saveSettings();
+    // prepareWindow() only ever hides the traffic lights, so this transition is
+    // the one place that has to bring them back on the open notes.
+    if (size === "default") {
+      for (const note of this.allNotes()) this.setTrafficLightsVisible(note, true);
+    }
+    this.scheduleRefreshAllNotes();
+  }
+
   async setTopLevelNote(path: string | null): Promise<void> {
     this.settings.topLevelNotePath = path;
     await this.saveSettings();
@@ -580,17 +593,19 @@ export default class DesktopStickyNotesPlugin extends Plugin {
     for (const [candidate, className] of Object.entries(HEADER_SIZE_CLASSES)) {
       if (className) classList.toggle(className, candidate === size);
     }
-    this.setTrafficLightsVisible(note, size === "default");
+    // Hiding only. The default size must not reach for a native window API on
+    // every focus and layout pass; setHeaderSize() and onunload() restore the
+    // buttons once per transition instead.
+    if (size !== "default") this.setTrafficLightsVisible(note, false);
   }
 
   private setTrafficLightsVisible(note: StickyNoteWindow, visible: boolean): void {
     // setWindowButtonVisibility only exists on macOS.
-    if (CURRENT_PLATFORM !== "macos") return;
-    // With Obsidian's window frame style set to "native" the traffic lights sit
-    // in a real title bar above the note, where hiding them would leave the
-    // window with no close control and no compact header to replace it.
+    if (CURRENT_PLATFORM !== "macos" || note.window.isDestroyed()) return;
+    // Only the "Hidden" window frame style puts the traffic lights on top of the
+    // note itself. The other styles give the window a title bar that this plugin
+    // neither draws nor replaces, so their buttons are left alone.
     if (!note.document.body.classList.contains("is-hidden-frameless")) return;
-    if (note.window.isDestroyed()) return;
     note.window.setWindowButtonVisibility(visible);
   }
 
@@ -607,7 +622,7 @@ export default class DesktopStickyNotesPlugin extends Plugin {
     window.setTimeout(() => this.prepareWindow(note), 75);
   }
 
-  scheduleRefreshAllNotes(): void {
+  private scheduleRefreshAllNotes(): void {
     for (const note of this.allNotes()) this.scheduleRefreshNote(note);
   }
 
@@ -970,12 +985,7 @@ class DesktopStickyNotesSettingTab extends PluginSettingTab {
       .addOption("extra-small", "Extra small")
       .setValue(this.plugin.settings.headerSize)
       .onChange(async (value) => {
-        if (!isHeaderSize(value)) return;
-        this.plugin.settings.headerSize = value;
-        await this.plugin.saveSettings();
-        // Open notes only pick the header size up from prepareWindow(), which
-        // otherwise runs no earlier than the next focus change.
-        this.plugin.scheduleRefreshAllNotes();
+        if (isHeaderSize(value)) await this.plugin.setHeaderSize(value);
       }));
   }
 
