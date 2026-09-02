@@ -6,6 +6,9 @@ const DEFAULT_COLOR = "#fff3a3";
 const DEFAULT_WIDTH = 360;
 const DEFAULT_HEIGHT = 360;
 const WINDOW_NAME_PREFIX = "desktop-sticky-notes:";
+// Used only when the note header cannot be measured; roughly Obsidian's
+// default header height, which keeps the header controls reachable.
+const FALLBACK_COLLAPSED_HEIGHT = 40;
 const LEGACY_DEFAULT_GLOBAL_SHORTCUT = "CommandOrControl+Alt+N";
 
 type DesktopPlatform = "linux" | "macos" | "windows";
@@ -118,6 +121,7 @@ function normalizeAcceleratorForPlatform(accelerator: string): string {
 interface StickyNoteSettings {
   defaultFolder: string;
   defaultNoteColor: string;
+  enableCollapsibleNotes: boolean;
   globalToggleShortcuts: Record<DesktopPlatform, string>;
   topLevelNotePath: string | null;
   topLevelWindowPosition: WindowPosition | null;
@@ -139,6 +143,7 @@ function createDefaultSettings(): StickyNoteSettings {
   return {
     defaultFolder: "",
     defaultNoteColor: DEFAULT_COLOR,
+    enableCollapsibleNotes: false,
     globalToggleShortcuts: { ...DEFAULT_GLOBAL_SHORTCUTS },
     topLevelNotePath: null,
     topLevelWindowPosition: null,
@@ -159,6 +164,11 @@ interface StickyNoteWindow {
   document: Document;
   window: NativeBrowserWindow;
   observer?: MutationObserver;
+  // Collapse state lives here rather than in the popout DOM: Obsidian rebuilds
+  // that DOM on focus and layout changes, so only the plugin can be relied on
+  // to know whether a window is collapsed and how tall it was before.
+  isCollapsed?: boolean;
+  expandedSize?: { width: number; height: number };
 }
 
 interface NativeBrowserWindow {
@@ -180,6 +190,8 @@ interface NativeBrowserWindow {
   close(): void;
   destroy(): void;
   getPosition(): [number, number];
+  getSize(): [number, number];
+  setSize(width: number, height: number): void;
 }
 
 export default class DesktopStickyNotesPlugin extends Plugin {
@@ -234,6 +246,7 @@ export default class DesktopStickyNotesPlugin extends Plugin {
     this.settings = {
       defaultFolder: stored.defaultFolder ?? defaults.defaultFolder,
       defaultNoteColor: stored.defaultNoteColor ?? defaults.defaultNoteColor,
+      enableCollapsibleNotes: stored.enableCollapsibleNotes ?? defaults.enableCollapsibleNotes,
       globalToggleShortcuts,
       topLevelNotePath: stored.topLevelNotePath ?? defaults.topLevelNotePath,
       topLevelWindowPosition: stored.topLevelWindowPosition ?? defaults.topLevelWindowPosition,
@@ -468,6 +481,15 @@ export default class DesktopStickyNotesPlugin extends Plugin {
     nativeWindow.focus();
   }
 
+  async setCollapsibleNotesEnabled(enabled: boolean): Promise<void> {
+    this.settings.enableCollapsibleNotes = enabled;
+    await this.saveSettings();
+    // Turning the feature off removes the only control that can restore a
+    // collapsed window, so no note may stay collapsed without it.
+    if (!enabled) for (const note of this.allNotes()) this.expandNote(note);
+    this.scheduleRefreshAllNotes();
+  }
+
   async setTopLevelNote(path: string | null): Promise<void> {
     this.settings.topLevelNotePath = path;
     await this.saveSettings();
@@ -668,6 +690,47 @@ export default class DesktopStickyNotesPlugin extends Plugin {
     this.updateModeButton(mode, view.getMode());
     view.addAction("x", "Hide sticky note", () => this.hideNote(note))
       .addClass("desktop-sticky-note-hide");
+  }
+
+  private toggleCollapsed(note: StickyNoteWindow): void {
+    if (note.isCollapsed) {
+      this.expandNote(note);
+    } else {
+      this.collapseNote(note);
+    }
+    this.addStickyActions(note);
+  }
+
+  private collapseNote(note: StickyNoteWindow): void {
+    const { window } = note;
+    if (window.isDestroyed() || note.isCollapsed) return;
+    const [width, height] = window.getSize();
+    note.expandedSize = { width, height };
+    // Resize first: a non-resizable window ignores size changes on some
+    // platforms, so the window must still be resizable while it shrinks.
+    window.setSize(width, this.collapsedHeight(note));
+    // A collapsed window must not be dragged to a new height, which would
+    // silently replace the height that expanding is supposed to restore.
+    window.setResizable(false);
+    note.isCollapsed = true;
+  }
+
+  private expandNote(note: StickyNoteWindow): void {
+    const { window } = note;
+    if (window.isDestroyed() || !note.isCollapsed) return;
+    const { width, height } = note.expandedSize ?? { width: DEFAULT_WIDTH, height: DEFAULT_HEIGHT };
+    window.setResizable(true);
+    window.setSize(width, height);
+    note.isCollapsed = false;
+  }
+
+  private collapsedHeight(note: StickyNoteWindow): number {
+    // Collapsing leaves exactly the note header visible. The header is measured
+    // instead of assumed so that a theme, a font size, or anything stacked
+    // above the header changes the collapsed height with it.
+    const header = note.document.querySelector(".view-header");
+    const headerBottom = header ? Math.ceil(header.getBoundingClientRect().bottom) : 0;
+    return headerBottom > 0 ? headerBottom : FALLBACK_COLLAPSED_HEIGHT;
   }
 
   // One predicate for both the observer and the refresh: a bar is complete
@@ -904,6 +967,11 @@ class DesktopStickyNotesSettingTab extends PluginSettingTab {
         render: (setting) => this.addDefaultColorControl(setting)
       },
       {
+        name: "Collapsible sticky notes",
+        desc: "Adds a collapse button that shrinks a sticky note to its header.",
+        render: (setting) => this.addCollapsibleNotesControl(setting)
+      },
+      {
         name: "Global toggle shortcut",
         desc: "System-wide shortcut for toggling the top-level sticky note. Click the shortcut, press a new combination, or press escape to cancel.",
         render: (setting) => this.addGlobalShortcutControl(setting)
@@ -926,6 +994,9 @@ class DesktopStickyNotesSettingTab extends PluginSettingTab {
     this.addDefaultColorControl(new Setting(containerEl)
       .setName("Default note color")
       .setDesc("Background color used for notes that do not have a saved custom color."));
+    this.addCollapsibleNotesControl(new Setting(containerEl)
+      .setName("Collapsible sticky notes")
+      .setDesc("Adds a collapse button that shrinks a sticky note to its header."));
     this.addGlobalShortcutControl(new Setting(containerEl)
       .setName("Global toggle shortcut")
       .setDesc("System-wide shortcut for toggling the top-level sticky note. Click the shortcut, press a new combination, or press escape to cancel."));
@@ -956,6 +1027,12 @@ class DesktopStickyNotesSettingTab extends PluginSettingTab {
         this.plugin.settings.defaultNoteColor = value;
         await this.plugin.saveSettings();
       }));
+  }
+
+  private addCollapsibleNotesControl(setting: Setting): void {
+    setting.addToggle((toggle) => toggle
+      .setValue(this.plugin.settings.enableCollapsibleNotes)
+      .onChange((value) => void this.plugin.setCollapsibleNotesEnabled(value)));
   }
 
   private addGlobalShortcutControl(setting: Setting): () => void {
