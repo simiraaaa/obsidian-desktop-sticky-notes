@@ -224,7 +224,7 @@ export default class DesktopStickyNotesPlugin extends Plugin {
     for (const note of [...this.allNotes()]) {
       this.rememberTopLevelPosition(note);
       // Restore the traffic lights in case the window outlives the close below.
-      if (this.settings.headerSize !== "default") this.setTrafficLightsVisible(note, true);
+      this.setTrafficLightsVisible(note, true);
       note.observer?.disconnect();
       note.leaf.detach();
       this.forceCloseWindow(note.window);
@@ -493,7 +493,9 @@ export default class DesktopStickyNotesPlugin extends Plugin {
     this.settings.headerSize = size;
     await this.saveSettings();
     // prepareWindow() only ever hides the traffic lights, so this transition is
-    // the one place that has to bring them back on the open notes.
+    // the one place that has to bring them back on the open notes. Restricted to
+    // the move back to "default": between two compact sizes the refresh below
+    // would immediately hide them again, which reads as a flicker.
     if (size === "default") {
       for (const note of this.allNotes()) this.setTrafficLightsVisible(note, true);
     }
@@ -612,18 +614,20 @@ export default class DesktopStickyNotesPlugin extends Plugin {
   }
 
   private setTrafficLightsVisible(note: StickyNoteWindow, visible: boolean): void {
-    // setWindowButtonVisibility only exists on macOS.
-    if (CURRENT_PLATFORM !== "macos" || note.window.isDestroyed()) return;
-    if (!note.window.setWindowButtonVisibility) return;
-    // The hiding call sits on prepareWindow()'s path, which Obsidian runs on
-    // every focus and layout change, so the remote call is made only when it
-    // would actually change something.
-    if (note.trafficLightsHidden === !visible) return;
+    // Hiding is on prepareWindow()'s path, which Obsidian runs on every focus
+    // and layout change, and only a window this plugin hid is ever shown again.
+    // Tracking that state keeps both directions off the main process unless the
+    // call would change something.
+    if ((note.trafficLightsHidden ?? false) === !visible) return;
     try {
+      // setWindowButtonVisibility only exists on macOS.
+      if (CURRENT_PLATFORM !== "macos" || note.window.isDestroyed()) return;
+      if (!note.window.setWindowButtonVisibility) return;
       note.window.setWindowButtonVisibility(visible);
     } catch {
-      // The remote proxy becomes invalid as soon as the window closes. Callers
-      // are part-way through building or tearing down a note and must carry on.
+      // isDestroyed() is itself a call into the main process, and the remote
+      // proxy becomes invalid as soon as the window closes. Callers are
+      // part-way through building or tearing down a note and must carry on.
       return;
     }
     note.trafficLightsHidden = !visible;
