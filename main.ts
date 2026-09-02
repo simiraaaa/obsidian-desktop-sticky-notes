@@ -739,7 +739,7 @@ export default class DesktopStickyNotesPlugin extends Plugin {
     this.applyCollapsedClass(note);
     // Resize first: a non-resizable window ignores size changes on some
     // platforms, so the window must still be resizable while it shrinks.
-    window.setContentSize(width, this.collapsedHeight(note));
+    window.setContentSize(width, this.collapsedHeight(note) ?? FALLBACK_COLLAPSED_HEIGHT);
     // A collapsed window must not be dragged to a new height, which would
     // silently replace the height that expanding is supposed to restore.
     window.setResizable(false);
@@ -767,11 +767,14 @@ export default class DesktopStickyNotesPlugin extends Plugin {
   private syncCollapsedHeight(note: StickyNoteWindow): void {
     const { window } = note;
     const [width, height] = window.getContentSize();
-    const collapsedHeight = this.collapsedHeight(note);
     // The header can become taller or shorter while a note is already collapsed
     // (another theme, an Obsidian setting, a different zoom level), so every
     // refresh re-fits the window instead of trusting the height it collapsed to.
-    if (height === collapsedHeight) return;
+    // An unmeasurable header leaves the window alone: refreshes run on every
+    // focus change, and resizing to a guessed height would make the window
+    // flicker whenever a theme sizes the header only in some states.
+    const collapsedHeight = this.collapsedHeight(note);
+    if (collapsedHeight === null || height === collapsedHeight) return;
     // Same order as collapseNote(): a non-resizable window ignores size changes
     // on some platforms, so the window is resizable while it is resized.
     window.setResizable(true);
@@ -779,7 +782,7 @@ export default class DesktopStickyNotesPlugin extends Plugin {
     window.setResizable(false);
   }
 
-  private collapsedHeight(note: StickyNoteWindow): number {
+  private collapsedHeight(note: StickyNoteWindow): number | null {
     // Collapsing leaves exactly the note header visible. The header is measured
     // instead of assumed so that a theme, a font size, or anything stacked
     // above the header changes the collapsed height with it.
@@ -790,7 +793,9 @@ export default class DesktopStickyNotesPlugin extends Plugin {
     // another pane there says nothing about this note's height.
     const header = note.leaf.view.containerEl.querySelector(".view-header");
     const headerBottom = header?.getBoundingClientRect().bottom ?? 0;
-    if (headerBottom <= 0) return FALLBACK_COLLAPSED_HEIGHT;
+    // No usable measurement; the caller decides whether guessing a height is
+    // better than leaving the window as it is.
+    if (headerBottom <= 0) return null;
     // Content sizes are device-independent pixels, and the zoom factor is
     // exactly the conversion from the CSS pixels the header was measured in.
     // The renderer's own viewport dimensions must not be used for this: right
