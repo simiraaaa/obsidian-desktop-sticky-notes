@@ -817,10 +817,9 @@ export default class DesktopStickyNotesPlugin extends Plugin {
     // on some platforms, so the window is resizable while it is resized.
     window.setResizable(true);
     window.setContentSize(width, collapsedHeight);
-    // Read back as in collapseNote(): where the resize is ignored the window
-    // stays resizable rather than being locked at a height it never took, and
-    // this refresh gives up instead of retrying.
-    if (!this.contentHeightReached(window, collapsedHeight)) return;
+    // The window is collapsed either way, so it must not be left resizable when
+    // the re-fit was ignored: dragging it would replace the height that
+    // expanding restores.
     window.setResizable(false);
   }
 
