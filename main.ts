@@ -655,7 +655,10 @@ export default class DesktopStickyNotesPlugin extends Plugin {
     actions.empty();
 
     if (this.settings.enableCollapsibleNotes) {
-      const collapse = view.addAction("chevron-down", "Collapse sticky note", () => this.toggleCollapsed(note));
+      const collapse = view.addAction("chevron-down", "Collapse sticky note", () => {
+        this.toggleCollapsed(note);
+        this.updateCollapseButton(collapse, note.isCollapsed === true);
+      });
       collapse.addClass("desktop-sticky-note-collapse");
       // Actions are rebuilt from scratch on every refresh, so the icon comes
       // from the tracked state rather than from the button being replaced.
@@ -706,7 +709,6 @@ export default class DesktopStickyNotesPlugin extends Plugin {
     } else {
       this.collapseNote(note);
     }
-    this.addStickyActions(note);
   }
 
   private collapseNote(note: StickyNoteWindow): void {
