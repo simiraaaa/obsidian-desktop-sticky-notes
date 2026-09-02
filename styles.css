@@ -44,6 +44,13 @@ body.desktop-sticky-note .view-actions .desktop-sticky-note-collapse {
   order: -1000;
 }
 
+/* The leaf is a flex column and Obsidian gives the header no flex-shrink: 0, so
+   once the window is only as tall as the header, the note body squeezes the
+   header down to its buttons and shows through underneath. */
+body.desktop-sticky-note.desktop-sticky-note-collapsed .view-header {
+  flex-shrink: 0;
+}
+
 /* While collapsed the title is all that is left of the note, so it has to stay
    readable even under themes that fade the header title out until hover. */
 body.desktop-sticky-note.desktop-sticky-note-collapsed .view-header .view-header-title-container {
