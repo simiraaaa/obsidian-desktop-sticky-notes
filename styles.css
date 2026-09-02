@@ -47,8 +47,11 @@ body.desktop-sticky-note .view-actions .desktop-sticky-note-collapse {
 /* The leaf is a flex column and Obsidian gives the header no flex-shrink: 0, so
    the note body squeezes the header in a short window. Pinning the header size
    for as long as the feature is enabled keeps the expanded and the collapsed
-   header exactly the same height. */
-body.desktop-sticky-note.desktop-sticky-note-collapsible .view-header {
+   header exactly the same height. A collapsed window keeps the rule even if the
+   feature is switched off underneath it, where a squeezed header would leave a
+   window too short for its own controls. */
+body.desktop-sticky-note.desktop-sticky-note-collapsible .view-header,
+body.desktop-sticky-note.desktop-sticky-note-collapsed .view-header {
   flex-shrink: 0;
 }
 
