@@ -580,7 +580,11 @@ export default class DesktopStickyNotesPlugin extends Plugin {
     document.querySelector(".workspace-tab-header-container")?.remove();
     this.applyColor(note, this.noteColor(note.file.path), false);
     this.configureWindowOwnership(note);
-    window.setResizable(!note.isCollapsed);
+    if (note.isCollapsed) {
+      this.syncCollapsedHeight(note);
+    } else {
+      window.setResizable(true);
+    }
     this.addStickyActions(note);
     this.observePresentation(note);
   }
@@ -734,7 +738,7 @@ export default class DesktopStickyNotesPlugin extends Plugin {
     this.applyCollapsedClass(note);
     // Resize first: a non-resizable window ignores size changes on some
     // platforms, so the window must still be resizable while it shrinks.
-    window.setContentSize(width, this.collapsedHeight(note));
+    window.setContentSize(width, this.collapsedHeight(note, height));
     // A collapsed window must not be dragged to a new height, which would
     // silently replace the height that expanding is supposed to restore.
     window.setResizable(false);
@@ -759,7 +763,22 @@ export default class DesktopStickyNotesPlugin extends Plugin {
     note.document.body.classList.toggle("desktop-sticky-note-collapsed", note.isCollapsed);
   }
 
-  private collapsedHeight(note: StickyNoteWindow): number {
+  private syncCollapsedHeight(note: StickyNoteWindow): void {
+    const { window } = note;
+    const [width, height] = window.getContentSize();
+    const collapsedHeight = this.collapsedHeight(note, height);
+    // The header can become taller or shorter while a note is already collapsed
+    // (another theme, an Obsidian setting, a different zoom level), so every
+    // refresh re-fits the window instead of trusting the height it collapsed to.
+    if (height === collapsedHeight) return;
+    // Same order as collapseNote(): a non-resizable window ignores size changes
+    // on some platforms, so the window is resizable while it is resized.
+    window.setResizable(true);
+    window.setContentSize(width, collapsedHeight);
+    window.setResizable(false);
+  }
+
+  private collapsedHeight(note: StickyNoteWindow, contentHeight: number): number {
     // Collapsing leaves exactly the note header visible. The header is measured
     // instead of assumed so that a theme, a font size, or anything stacked
     // above the header changes the collapsed height with it.
@@ -772,10 +791,9 @@ export default class DesktopStickyNotesPlugin extends Plugin {
     const headerBottom = header?.getBoundingClientRect().bottom ?? 0;
     if (headerBottom <= 0) return FALLBACK_COLLAPSED_HEIGHT;
     // Content sizes are device-independent pixels, which match CSS pixels only
-    // at 100% zoom. The ratio between the two heights converts the measurement
-    // for any other zoom level.
+    // at 100% zoom. The ratio between the current content height and the same
+    // area in CSS pixels converts the measurement for any other zoom level.
     const innerHeight = note.document.defaultView?.innerHeight ?? 0;
-    const [, contentHeight] = note.window.getContentSize();
     const dipsPerCssPixel = innerHeight > 0 && contentHeight > 0 ? contentHeight / innerHeight : 1;
     return Math.ceil(headerBottom * dipsPerCssPixel);
   }
