@@ -575,6 +575,7 @@ export default class DesktopStickyNotesPlugin extends Plugin {
     document.title = nativeTitle;
     window.setTitle(nativeTitle);
     document.body.classList.add("desktop-sticky-note");
+    document.body.classList.toggle("desktop-sticky-note-collapsible", this.settings.enableCollapsibleNotes);
     this.applyCollapsedClass(note);
     document.querySelector(".workspace-tab-header-container")?.remove();
     this.applyColor(note, this.noteColor(note.file.path), false);
