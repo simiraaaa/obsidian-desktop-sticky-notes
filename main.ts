@@ -840,7 +840,9 @@ export default class DesktopStickyNotesPlugin extends Plugin {
     const headerBottom = header?.getBoundingClientRect().bottom ?? 0;
     // No usable measurement. Both callers then leave the window as it is: a
     // guessed height could cut off the header the collapsed window consists of.
-    if (headerBottom <= 0) return null;
+    // Non-finite values are rejected as well, since NaN passes every comparison
+    // and would reach setContentSize() as an undefined height.
+    if (!Number.isFinite(headerBottom) || headerBottom <= 0) return null;
     // Content sizes are device-independent pixels, and the zoom factor is
     // exactly the conversion from the CSS pixels the header was measured in.
     // The renderer's own viewport dimensions must not be used for this: right
