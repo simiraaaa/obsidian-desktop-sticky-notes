@@ -167,7 +167,7 @@ interface StickyNoteWindow {
   // Collapse state lives here rather than in the popout DOM: Obsidian rebuilds
   // that DOM on focus and layout changes, so only the plugin can be relied on
   // to know whether a window is collapsed and how tall it was before.
-  isCollapsed?: boolean;
+  isCollapsed: boolean;
   expandedSize?: { width: number; height: number };
 }
 
@@ -552,7 +552,7 @@ export default class DesktopStickyNotesPlugin extends Plugin {
       return false;
     }
 
-    const note: StickyNoteWindow = { file, leaf, document, window: browserWindow };
+    const note: StickyNoteWindow = { file, leaf, document, window: browserWindow, isCollapsed: false };
     this.initializedLeaves.add(leaf);
     this.trackNote(note);
     this.prepareWindow(note);
@@ -666,12 +666,12 @@ export default class DesktopStickyNotesPlugin extends Plugin {
     if (this.settings.enableCollapsibleNotes) {
       const collapse = view.addAction("chevron-down", "Collapse sticky note", () => {
         this.toggleCollapsed(note);
-        this.updateCollapseButton(collapse, note.isCollapsed === true);
+        this.updateCollapseButton(collapse, note.isCollapsed);
       });
       collapse.addClass("desktop-sticky-note-collapse");
       // Actions are rebuilt from scratch on every refresh, so the icon comes
       // from the tracked state rather than from the button being replaced.
-      this.updateCollapseButton(collapse, note.isCollapsed === true);
+      this.updateCollapseButton(collapse, note.isCollapsed);
     }
 
     const pin = view.addAction("pin", "Keep on top", () => {
@@ -736,8 +736,10 @@ export default class DesktopStickyNotesPlugin extends Plugin {
 
   private expandNote(note: StickyNoteWindow): void {
     const { window } = note;
-    if (window.isDestroyed() || !note.isCollapsed) return;
-    const { width, height } = note.expandedSize ?? { width: DEFAULT_WIDTH, height: DEFAULT_HEIGHT };
+    // Collapsing always records the expanded size, so a collapsed note without
+    // one is an inconsistent state rather than a case to guess a size for.
+    if (window.isDestroyed() || !note.isCollapsed || !note.expandedSize) return;
+    const { width, height } = note.expandedSize;
     window.setResizable(true);
     window.setContentSize(width, height);
     note.isCollapsed = false;
