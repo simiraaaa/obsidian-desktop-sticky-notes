@@ -172,6 +172,7 @@ interface StickyNoteWindow {
   document: Document;
   window: NativeBrowserWindow;
   observer?: MutationObserver;
+  trafficLightsHidden?: boolean;
 }
 
 interface NativeBrowserWindow {
@@ -193,7 +194,8 @@ interface NativeBrowserWindow {
   close(): void;
   destroy(): void;
   getPosition(): [number, number];
-  setWindowButtonVisibility(visible: boolean): void;
+  // macOS only: the proxy for a window on another platform does not carry it.
+  setWindowButtonVisibility?(visible: boolean): void;
 }
 
 export default class DesktopStickyNotesPlugin extends Plugin {
@@ -596,17 +598,35 @@ export default class DesktopStickyNotesPlugin extends Plugin {
     // Hiding only. The default size must not reach for a native window API on
     // every focus and layout pass; setHeaderSize() and onunload() restore the
     // buttons once per transition instead.
-    if (size !== "default") this.setTrafficLightsVisible(note, false);
+    if (size !== "default") this.hideTrafficLights(note);
+  }
+
+  private hideTrafficLights(note: StickyNoteWindow): void {
+    // Only the "Hidden" window frame style puts the traffic lights on top of the
+    // note itself. The other styles give the window a title bar that this plugin
+    // neither draws nor replaces, so their buttons are left alone. The restoring
+    // call deliberately skips this check: once the buttons are hidden they have
+    // to come back even if the window has since stopped matching it.
+    if (!note.document.body.classList.contains("is-hidden-frameless")) return;
+    this.setTrafficLightsVisible(note, false);
   }
 
   private setTrafficLightsVisible(note: StickyNoteWindow, visible: boolean): void {
     // setWindowButtonVisibility only exists on macOS.
     if (CURRENT_PLATFORM !== "macos" || note.window.isDestroyed()) return;
-    // Only the "Hidden" window frame style puts the traffic lights on top of the
-    // note itself. The other styles give the window a title bar that this plugin
-    // neither draws nor replaces, so their buttons are left alone.
-    if (!note.document.body.classList.contains("is-hidden-frameless")) return;
-    note.window.setWindowButtonVisibility(visible);
+    if (!note.window.setWindowButtonVisibility) return;
+    // The hiding call sits on prepareWindow()'s path, which Obsidian runs on
+    // every focus and layout change, so the remote call is made only when it
+    // would actually change something.
+    if (note.trafficLightsHidden === !visible) return;
+    try {
+      note.window.setWindowButtonVisibility(visible);
+    } catch {
+      // The remote proxy becomes invalid as soon as the window closes. Callers
+      // are part-way through building or tearing down a note and must carry on.
+      return;
+    }
+    note.trafficLightsHidden = !visible;
   }
 
   private watchWindow(note: StickyNoteWindow, domWindow: Window): void {
