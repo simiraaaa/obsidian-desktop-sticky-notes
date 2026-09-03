@@ -7,6 +7,7 @@ const DEFAULT_WIDTH = 360;
 const DEFAULT_HEIGHT = 360;
 const WINDOW_NAME_PREFIX = "desktop-sticky-notes:";
 const LEGACY_DEFAULT_GLOBAL_SHORTCUT = "CommandOrControl+Alt+N";
+const SETTINGS_SAVE_DEBOUNCE_MS = 500;
 
 type DesktopPlatform = "linux" | "macos" | "windows";
 
@@ -119,10 +120,12 @@ interface StickyNoteSettings {
   defaultFolder: string;
   defaultNoteColor: string;
   enableCollapsibleNotes: boolean;
+  restoreNotesOnStartup: boolean;
   globalToggleShortcuts: Record<DesktopPlatform, string>;
   topLevelNotePath: string | null;
   topLevelWindowPosition: WindowPosition | null;
   colorsByPath: Record<string, string>;
+  savedWindowsByPath: Record<string, SavedNoteWindow>;
 }
 
 type StoredStickyNoteSettings = Partial<Omit<StickyNoteSettings, "globalToggleShortcuts">> & {
@@ -136,15 +139,92 @@ interface WindowPosition {
   y: number;
 }
 
+interface WindowSize {
+  width: number;
+  height: number;
+}
+
+type WindowBounds = WindowPosition & WindowSize;
+
+interface SavedNoteWindow {
+  // The bounds the window expands to, which for a collapsed note is not the
+  // size it currently has on screen.
+  bounds: WindowBounds;
+  // Size of the work area the window was on. Restoring compares it with the
+  // work area of the display the window lands on today, so a note keeps its
+  // relative place after a resolution or monitor change.
+  workArea: WindowSize;
+  isPinned: boolean;
+  isCollapsed: boolean;
+}
+
+function finiteNumber(value: unknown): number | null {
+  return typeof value === "number" && Number.isFinite(value) ? value : null;
+}
+
+function positiveNumber(value: unknown): number | null {
+  const parsed = finiteNumber(value);
+  return parsed !== null && parsed > 0 ? parsed : null;
+}
+
+function parseWindowSize(value: unknown): WindowSize | null {
+  if (typeof value !== "object" || value === null) return null;
+  const { width, height } = value as Record<string, unknown>;
+  const parsedWidth = positiveNumber(width);
+  const parsedHeight = positiveNumber(height);
+  if (parsedWidth === null || parsedHeight === null) return null;
+  return { width: parsedWidth, height: parsedHeight };
+}
+
+function parseWindowBounds(value: unknown): WindowBounds | null {
+  const size = parseWindowSize(value);
+  if (!size) return null;
+  const { x, y } = value as Record<string, unknown>;
+  const parsedX = finiteNumber(x);
+  const parsedY = finiteNumber(y);
+  if (parsedX === null || parsedY === null) return null;
+  return { x: parsedX, y: parsedY, ...size };
+}
+
+// Saved geometry is fed straight into the window manager, where a missing or
+// non-numeric value would throw instead of being ignored. Stored data can be
+// hand-edited or partially synced, so every entry is validated before use and
+// an unusable one is dropped rather than repaired with guessed numbers.
+function parseSavedNoteWindow(value: unknown): SavedNoteWindow | null {
+  if (typeof value !== "object" || value === null) return null;
+  const { bounds, workArea, isPinned, isCollapsed } = value as Record<string, unknown>;
+  const parsedBounds = parseWindowBounds(bounds);
+  const parsedWorkArea = parseWindowSize(workArea);
+  if (!parsedBounds || !parsedWorkArea) return null;
+  return {
+    bounds: parsedBounds,
+    workArea: parsedWorkArea,
+    isPinned: isPinned === true,
+    isCollapsed: isCollapsed === true
+  };
+}
+
+function parseSavedNoteWindows(value: unknown): Record<string, SavedNoteWindow> {
+  const saved: Record<string, SavedNoteWindow> = {};
+  if (typeof value !== "object" || value === null) return saved;
+  for (const [path, entry] of Object.entries(value as Record<string, unknown>)) {
+    const parsed = parseSavedNoteWindow(entry);
+    if (parsed) saved[path] = parsed;
+  }
+  return saved;
+}
+
 function createDefaultSettings(): StickyNoteSettings {
   return {
     defaultFolder: "",
     defaultNoteColor: DEFAULT_COLOR,
     enableCollapsibleNotes: false,
+    restoreNotesOnStartup: false,
     globalToggleShortcuts: { ...DEFAULT_GLOBAL_SHORTCUTS },
     topLevelNotePath: null,
     topLevelWindowPosition: null,
-    colorsByPath: {}
+    colorsByPath: {},
+    savedWindowsByPath: {}
   };
 }
 
@@ -166,7 +246,10 @@ interface StickyNoteWindow {
   // that DOM on focus and layout changes, so only the plugin can be relied on
   // to know whether a window is collapsed and how tall it was before.
   isCollapsed: boolean;
-  expandedSize?: { width: number; height: number };
+  expandedSize?: WindowSize;
+  // Kept so the listener can be detached again: it lives in the main process
+  // and would otherwise outlive both the window and the plugin.
+  geometryListener?: () => void;
 }
 
 interface NativeBrowserWindow {
@@ -188,8 +271,12 @@ interface NativeBrowserWindow {
   close(): void;
   destroy(): void;
   getPosition(): [number, number];
+  getBounds(): WindowBounds;
+  setBounds(bounds: WindowBounds): void;
   getContentSize(): [number, number];
   setContentSize(width: number, height: number): void;
+  on(event: "move" | "resize", listener: () => void): void;
+  removeListener(event: "move" | "resize", listener: () => void): void;
   webContents: { getZoomFactor(): number };
 }
 
@@ -199,6 +286,7 @@ export default class DesktopStickyNotesPlugin extends Plugin {
   private initializedLeaves = new WeakSet<WorkspaceLeaf>();
   private registeredGlobalShortcut: string | null = null;
   private shortcutRegistrationTimer: number | null = null;
+  private settingsSaveTimer: number | null = null;
   private toggleInProgress = false;
 
   async onload(): Promise<void> {
@@ -218,11 +306,18 @@ export default class DesktopStickyNotesPlugin extends Plugin {
     this.unregisterGlobalToggleShortcut();
     for (const note of [...this.allNotes()]) {
       this.rememberTopLevelPosition(note);
+      // Quitting Obsidian is what restoring exists for, so the geometry is
+      // captured here even though the window events already record it: the
+      // debounced write may still be pending, and a window that never moved
+      // has not produced an event at all.
+      this.rememberNoteState(note);
+      this.unwatchWindowGeometry(note);
       note.observer?.disconnect();
       note.leaf.detach();
       this.forceCloseWindow(note.window);
     }
     this.notesByPath.clear();
+    this.flushSettingsSave();
     void this.app.workspace.requestSaveLayout();
   }
 
@@ -246,10 +341,12 @@ export default class DesktopStickyNotesPlugin extends Plugin {
       defaultFolder: stored.defaultFolder ?? defaults.defaultFolder,
       defaultNoteColor: stored.defaultNoteColor ?? defaults.defaultNoteColor,
       enableCollapsibleNotes: stored.enableCollapsibleNotes ?? defaults.enableCollapsibleNotes,
+      restoreNotesOnStartup: stored.restoreNotesOnStartup ?? defaults.restoreNotesOnStartup,
       globalToggleShortcuts,
       topLevelNotePath: stored.topLevelNotePath ?? defaults.topLevelNotePath,
       topLevelWindowPosition: stored.topLevelWindowPosition ?? defaults.topLevelWindowPosition,
-      colorsByPath: stored.colorsByPath ?? defaults.colorsByPath
+      colorsByPath: stored.colorsByPath ?? defaults.colorsByPath,
+      savedWindowsByPath: parseSavedNoteWindows(stored.savedWindowsByPath)
     };
 
     if (Object.prototype.hasOwnProperty.call(stored, "globalToggleShortcut")) {
@@ -405,6 +502,11 @@ export default class DesktopStickyNotesPlugin extends Plugin {
         delete this.settings.colorsByPath[oldPath];
         this.settings.colorsByPath[file.path] = color;
       }
+      const savedWindow = this.settings.savedWindowsByPath[oldPath];
+      if (savedWindow) {
+        delete this.settings.savedWindowsByPath[oldPath];
+        this.settings.savedWindowsByPath[file.path] = savedWindow;
+      }
       void this.saveSettings();
     }));
   }
@@ -501,31 +603,54 @@ export default class DesktopStickyNotesPlugin extends Plugin {
     this.scheduleRefreshAllNotes();
   }
 
+  async setRestoreNotesEnabled(enabled: boolean): Promise<void> {
+    this.settings.restoreNotesOnStartup = enabled;
+    if (enabled) {
+      // Notes that are already open would otherwise only enter the list once
+      // they are moved, which makes the setting look like it did nothing.
+      for (const note of this.allNotes()) this.rememberNoteState(note);
+    } else {
+      // Keeping the list while it is not used would restore a stale desktop
+      // whenever the setting is switched back on.
+      this.settings.savedWindowsByPath = {};
+    }
+    await this.saveSettings();
+  }
+
   async setTopLevelNote(path: string | null): Promise<void> {
+    // The top-level note is shown and hidden by its own toggle and keeps its
+    // own saved position, so it is never part of the restore list.
+    this.forgetNoteState(path);
     this.settings.topLevelNotePath = path;
     await this.saveSettings();
+    // A note that just stopped being the top-level note becomes an ordinary
+    // sticky note and joins the restore list from here on.
+    for (const note of this.allNotes()) this.rememberNoteState(note);
     this.scheduleRefreshAllNotes();
     new Notice(path ? `Top-level sticky note: ${path}` : "Top-level sticky note cleared.");
   }
 
-  async openStickyNote(file: TFile): Promise<void> {
-    const savedPosition = file.path === this.settings.topLevelNotePath
-      ? this.settings.topLevelWindowPosition
-      : null;
-    const initialPosition = savedPosition && this.positionIsVisible(savedPosition)
-      ? savedPosition
-      : null;
+  async openStickyNote(file: TFile, initialBounds?: WindowBounds): Promise<StickyNoteWindow | null> {
+    const bounds = initialBounds ?? this.initialTopLevelBounds(file);
     const leaf = this.app.workspace.openPopoutLeaf({
-      size: { width: DEFAULT_WIDTH, height: DEFAULT_HEIGHT },
-      ...(initialPosition ? { x: initialPosition.x, y: initialPosition.y } : {})
+      size: bounds ? { width: bounds.width, height: bounds.height } : { width: DEFAULT_WIDTH, height: DEFAULT_HEIGHT },
+      ...(bounds ? { x: bounds.x, y: bounds.y } : {})
     });
     await leaf.openFile(file, { active: true });
 
-    this.initializeStickyLeaf(file, leaf);
+    return this.initializeStickyLeaf(file, leaf);
   }
 
-  private initializeStickyLeaf(file: TFile, leaf: WorkspaceLeaf, detachOnFailure = true): boolean {
-    if (this.initializedLeaves.has(leaf)) return false;
+  private initialTopLevelBounds(file: TFile): WindowBounds | null {
+    const position = file.path === this.settings.topLevelNotePath
+      ? this.settings.topLevelWindowPosition
+      : null;
+    if (!position || !this.positionIsVisible(position)) return null;
+    return { ...position, width: DEFAULT_WIDTH, height: DEFAULT_HEIGHT };
+  }
+
+  private initializeStickyLeaf(file: TFile, leaf: WorkspaceLeaf, detachOnFailure = true): StickyNoteWindow | null {
+    if (this.initializedLeaves.has(leaf)) return null;
 
     // The view's ownerDocument is permanently tied to this popout. Obsidian's
     // activeDocument is global and can point at the main window after blur.
@@ -536,7 +661,7 @@ export default class DesktopStickyNotesPlugin extends Plugin {
         leaf.detach();
         new Notice("Could not access the sticky-note document.");
       }
-      return false;
+      return null;
     }
     // The DOM Window exposed by an Obsidian popout deliberately does not expose
     // Electron's webContents. A unique document title is visible to Electron,
@@ -551,7 +676,7 @@ export default class DesktopStickyNotesPlugin extends Plugin {
         leaf.detach();
         new Notice("Could not create the sticky-note window.");
       }
-      return false;
+      return null;
     }
 
     const note: StickyNoteWindow = { file, leaf, document, window: browserWindow, isCollapsed: false };
@@ -559,11 +684,17 @@ export default class DesktopStickyNotesPlugin extends Plugin {
     this.trackNote(note);
     this.prepareWindow(note);
     this.watchWindow(note, domWindow);
+    this.watchWindowGeometry(note);
+    this.rememberNoteState(note);
     this.registerDomEvent(domWindow, "beforeunload", () => {
       this.rememberTopLevelPosition(note);
+      // Hiding a note untracks it before its window closes, so a note that is
+      // still tracked here is closing for a reason outside the plugin
+      // (Obsidian quitting, the window manager) and stays in the restore list.
+      if (this.isTracked(note)) this.rememberNoteState(note);
       this.untrackNote(note);
     });
-    return true;
+    return note;
   }
 
   private prepareWindow(note: StickyNoteWindow): void {
@@ -597,6 +728,34 @@ export default class DesktopStickyNotesPlugin extends Plugin {
     const restore = () => this.scheduleRefreshNote(note);
     this.registerDomEvent(domWindow, "focus", restore);
     this.registerDomEvent(domWindow, "blur", restore);
+  }
+
+  private watchWindowGeometry(note: StickyNoteWindow): void {
+    const { window } = note;
+    if (note.geometryListener || window.isDestroyed()) return;
+    // These fire in the main process and reach the plugin over the remote
+    // bridge. "move" and "resize" repeat throughout a drag, so the listener
+    // only updates the in-memory state and defers the write to disk.
+    // "moved" and "resized" are deliberately not used: they never fire on
+    // Linux, and the debounced write already collapses a whole drag into one.
+    const listener = () => this.rememberNoteState(note);
+    note.geometryListener = listener;
+    window.on("move", listener);
+    window.on("resize", listener);
+  }
+
+  private unwatchWindowGeometry(note: StickyNoteWindow): void {
+    const listener = note.geometryListener;
+    if (!listener) return;
+    delete note.geometryListener;
+    try {
+      if (note.window.isDestroyed()) return;
+      note.window.removeListener("move", listener);
+      note.window.removeListener("resize", listener);
+    } catch {
+      // The remote proxy becomes invalid as soon as the window closes, which
+      // also releases the listener it was holding.
+    }
   }
 
   private scheduleRefreshNote(note: StickyNoteWindow): void {
@@ -684,14 +843,8 @@ export default class DesktopStickyNotesPlugin extends Plugin {
     }
 
     const pin = view.addAction("pin", "Keep on top", () => {
-      const pinned = !note.window.isAlwaysOnTop();
-      // A child window's stacking is constrained by its application parent on
-      // some window managers. Promote it to a native top-level window before
-      // enabling the OS-wide always-on-top state.
-      if (pinned) note.window.setParentWindow(null);
-      note.window.setAlwaysOnTop(pinned);
-      this.configureWindowOwnership(note);
-      if (pinned) note.window.moveTop();
+      this.setNotePinned(note, !note.window.isAlwaysOnTop());
+      this.rememberNoteState(note);
       this.updatePinButton(pin, note.window.isAlwaysOnTop());
     });
     pin.addClass("desktop-sticky-note-pin");
@@ -727,6 +880,7 @@ export default class DesktopStickyNotesPlugin extends Plugin {
     } else {
       this.collapseNote(note);
     }
+    this.rememberNoteState(note);
   }
 
   private collapseNote(note: StickyNoteWindow): void {
@@ -907,6 +1061,16 @@ export default class DesktopStickyNotesPlugin extends Plugin {
     setTooltip(button, pinned ? "Stop keeping on top" : "Keep on top");
   }
 
+  private setNotePinned(note: StickyNoteWindow, pinned: boolean): void {
+    // A child window's stacking is constrained by its application parent on
+    // some window managers. Promote it to a native top-level window before
+    // enabling the OS-wide always-on-top state.
+    if (pinned) note.window.setParentWindow(null);
+    note.window.setAlwaysOnTop(pinned);
+    this.configureWindowOwnership(note);
+    if (pinned) note.window.moveTop();
+  }
+
   private configureWindowOwnership(note: StickyNoteWindow): void {
     const { window } = note;
     // Top-level and pinned notes must be independent native windows. A regular
@@ -954,6 +1118,7 @@ export default class DesktopStickyNotesPlugin extends Plugin {
 
   private untrackNote(note: StickyNoteWindow): void {
     note.observer?.disconnect();
+    this.unwatchWindowGeometry(note);
     this.initializedLeaves.delete(note.leaf);
     const notes = this.notesByPath.get(note.file.path);
     if (!notes) return;
@@ -962,6 +1127,7 @@ export default class DesktopStickyNotesPlugin extends Plugin {
   }
 
   private closeNotesForPath(path: string): void {
+    this.forgetNoteState(path);
     const notes = [...(this.notesByPath.get(path) ?? [])];
     for (const note of notes) {
       this.rememberTopLevelPosition(note);
@@ -979,6 +1145,7 @@ export default class DesktopStickyNotesPlugin extends Plugin {
   }
 
   private hideNote(note: StickyNoteWindow): void {
+    this.forgetNoteState(note.file.path);
     this.rememberTopLevelPosition(note);
     this.clearWindowMarker(note);
     this.untrackNote(note);
@@ -1043,6 +1210,73 @@ export default class DesktopStickyNotesPlugin extends Plugin {
     if (note.file.path !== this.settings.topLevelNotePath || note.window.isDestroyed()) return;
     const [x, y] = note.window.getPosition();
     this.settings.topLevelWindowPosition = { x, y };
+    void this.saveSettings();
+  }
+
+  private isTracked(note: StickyNoteWindow): boolean {
+    return this.notesByPath.get(note.file.path)?.has(note) ?? false;
+  }
+
+  private rememberNoteState(note: StickyNoteWindow): void {
+    if (!this.settings.restoreNotesOnStartup) return;
+    if (note.file.path === this.settings.topLevelNotePath) return;
+    try {
+      const bounds = this.expandedBounds(note);
+      if (!bounds) return;
+      const { width, height } = screen.getDisplayMatching(bounds).workArea;
+      this.settings.savedWindowsByPath[note.file.path] = {
+        bounds,
+        workArea: { width, height },
+        isPinned: note.window.isAlwaysOnTop(),
+        isCollapsed: note.isCollapsed
+      };
+      this.scheduleSettingsSave();
+    } catch {
+      // The remote proxy becomes invalid as soon as a window closes. The state
+      // recorded before that is the last one worth restoring.
+    }
+  }
+
+  private forgetNoteState(path: string | null): void {
+    if (!path || !(path in this.settings.savedWindowsByPath)) return;
+    delete this.settings.savedWindowsByPath[path];
+    this.scheduleSettingsSave();
+  }
+
+  private expandedBounds(note: StickyNoteWindow): WindowBounds | null {
+    const { window } = note;
+    if (window.isDestroyed()) return null;
+    const bounds = window.getBounds();
+    if (!note.isCollapsed || !note.expandedSize) return bounds;
+    // A collapsed window is only as tall as its header, and restoring that
+    // height would produce a window with nothing left to expand to. The
+    // expanded content size is converted to window bounds through the frame
+    // the window currently has, which is measured rather than assumed: its
+    // size depends on the platform and on Obsidian's window frame setting.
+    const [contentWidth, contentHeight] = window.getContentSize();
+    return {
+      x: bounds.x,
+      y: bounds.y,
+      width: note.expandedSize.width + (bounds.width - contentWidth),
+      height: note.expandedSize.height + (bounds.height - contentHeight)
+    };
+  }
+
+  // Window moves and resizes arrive continuously while a window is dragged, so
+  // the settings file is written once the movement has settled instead of on
+  // every event. The in-memory settings are already current at that point.
+  private scheduleSettingsSave(): void {
+    if (this.settingsSaveTimer !== null) window.clearTimeout(this.settingsSaveTimer);
+    this.settingsSaveTimer = window.setTimeout(() => {
+      this.settingsSaveTimer = null;
+      void this.saveSettings();
+    }, SETTINGS_SAVE_DEBOUNCE_MS);
+  }
+
+  private flushSettingsSave(): void {
+    if (this.settingsSaveTimer === null) return;
+    window.clearTimeout(this.settingsSaveTimer);
+    this.settingsSaveTimer = null;
     void this.saveSettings();
   }
 
@@ -1112,6 +1346,11 @@ class DesktopStickyNotesSettingTab extends PluginSettingTab {
         render: (setting) => this.addCollapsibleNotesControl(setting)
       },
       {
+        name: "Restore sticky notes on startup",
+        desc: "Reopen the sticky notes that were open when Obsidian last closed, with their position, size, pinned state, and collapsed state.",
+        render: (setting) => this.addRestoreNotesControl(setting)
+      },
+      {
         name: "Global toggle shortcut",
         desc: "System-wide shortcut for toggling the top-level sticky note. Click the shortcut, press a new combination, or press escape to cancel.",
         render: (setting) => this.addGlobalShortcutControl(setting)
@@ -1137,6 +1376,9 @@ class DesktopStickyNotesSettingTab extends PluginSettingTab {
     this.addCollapsibleNotesControl(new Setting(containerEl)
       .setName("Collapsible sticky notes")
       .setDesc("Adds a collapse button that shrinks a sticky note to its header."));
+    this.addRestoreNotesControl(new Setting(containerEl)
+      .setName("Restore sticky notes on startup")
+      .setDesc("Reopen the sticky notes that were open when Obsidian last closed, with their position, size, pinned state, and collapsed state."));
     this.addGlobalShortcutControl(new Setting(containerEl)
       .setName("Global toggle shortcut")
       .setDesc("System-wide shortcut for toggling the top-level sticky note. Click the shortcut, press a new combination, or press escape to cancel."));
@@ -1173,6 +1415,12 @@ class DesktopStickyNotesSettingTab extends PluginSettingTab {
     setting.addToggle((toggle) => toggle
       .setValue(this.plugin.settings.enableCollapsibleNotes)
       .onChange((value) => void this.plugin.setCollapsibleNotesEnabled(value)));
+  }
+
+  private addRestoreNotesControl(setting: Setting): void {
+    setting.addToggle((toggle) => toggle
+      .setValue(this.plugin.settings.restoreNotesOnStartup)
+      .onChange((value) => void this.plugin.setRestoreNotesEnabled(value)));
   }
 
   private addGlobalShortcutControl(setting: Setting): () => void {
