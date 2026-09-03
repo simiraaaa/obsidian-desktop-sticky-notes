@@ -13,7 +13,7 @@ An Obsidian desktop-only plugin that opens real Markdown files in resizable stic
 Each sticky-note window has controls for keeping it above other applications, selecting a color, switching between edit and reading views, and hiding it. Window contents are the underlying Obsidian Markdown file, so edits and previews stay in sync with the vault.
 
 > [!NOTE]
-> On Linux, **Keep on top** works when Obsidian runs under X11 or XWayland. Electron does not support the required always-on-top window state under native Wayland, so the pin control cannot change window stacking in a native Wayland session.
+> On Linux, **Keep on top** works when Obsidian runs under X11 or XWayland. Electron does not support the required always-on-top window state under native Wayland, so the pin control cannot change window stacking in a native Wayland session. Electron implements **Window opacity** on Windows and macOS only, so that setting has no visible effect on Linux.
 
 > [!NOTE]
 > On macOS, a pinned note becomes a top-level window and the system draws its frame with a fixed 10px corner radius. With **Header size** set to **Extra small** the 14px header is rounded more tightly than that frame, which leaves a hairline gap visible at the right edge of the header. **Small** (20px) matches the system radius and has no gap.
@@ -22,6 +22,8 @@ Each sticky-note window has controls for keeping it above other applications, se
 
 - **Default notes folder** — where newly created sticky-note files are stored; defaults to the vault root.
 - **Default note color** — the initial background color for notes without a saved custom color.
+- **Window opacity** — how opaque every sticky-note window is, from 20% to fully opaque. The default keeps every window fully opaque, and the value applies to all sticky notes at once.
+
 - **Header size** — how tall the toolbar above each note is. **Default** keeps Obsidian's regular 40px header. **Small** (20px) and **Extra small** (14px) shrink it to a macOS Stickies-like strip, paint it in the note color, and hide the macOS traffic lights so the note's own controls own the top of the window. The traffic lights are only touched when Obsidian's **Window frame style** is *Hidden*, which is the one style that draws them on top of the note itself. With *Obsidian frame* or *Native frame* the window gets its own title bar that this plugin does not draw, so its buttons are left alone and only the styling applies.
 
 - **Collapsible sticky notes** — adds a collapse control to every sticky-note window. Collapsing shrinks the window to its header, and expanding restores the height the window had before it was collapsed. A collapsed window cannot be resized; expanding makes it resizable again. Windows open expanded again after they are hidden, and after Obsidian restarts unless **Restore sticky notes on startup** brings them back collapsed. Off by default. A collapsed window keeps showing the note name in its header. CSS snippets can hook into the `desktop-sticky-note-collapsible` body class, present while the setting is on, and `desktop-sticky-note-collapsed`, present while a window is collapsed. Under native Wayland, Electron may be unable to resize a window programmatically; the plugin reads the size back and cancels the collapse when the window did not shrink.

@@ -6,6 +6,9 @@ const DEFAULT_COLOR = "#fff3a3";
 const DEFAULT_WIDTH = 360;
 const DEFAULT_HEIGHT = 360;
 const WINDOW_NAME_PREFIX = "desktop-sticky-notes:";
+const MIN_WINDOW_OPACITY = 0.2;
+const FULL_WINDOW_OPACITY = 1;
+const WINDOW_OPACITY_STEP = 0.05;
 const LEGACY_DEFAULT_GLOBAL_SHORTCUT = "CommandOrControl+Alt+N";
 const SETTINGS_SAVE_DEBOUNCE_MS = 500;
 const HEADER_MEASURE_ATTEMPTS = 20;
@@ -122,6 +125,18 @@ function normalizeAcceleratorForPlatform(accelerator: string): string {
   }).join("+");
 }
 
+function isWindowOpacity(value: unknown): value is number {
+  return typeof value === "number" && Number.isFinite(value)
+    && value >= MIN_WINDOW_OPACITY && value <= FULL_WINDOW_OPACITY;
+}
+
+function normalizeWindowOpacity(value: number): number {
+  // Keeps the stored value on the slider's own grid, so that the persisted
+  // value, the slider position and the applied opacity always agree, whether
+  // the value came from the slider or from a hand-edited data.json.
+  return Math.round(Math.round(value / WINDOW_OPACITY_STEP) * WINDOW_OPACITY_STEP * 100) / 100;
+}
+
 type HeaderSize = "default" | "extra-small" | "small";
 
 // "default" maps to no class so that the default appearance stays exactly the
@@ -140,6 +155,8 @@ function isHeaderSize(value: unknown): value is HeaderSize {
 interface StickyNoteSettings {
   defaultFolder: string;
   defaultNoteColor: string;
+  windowOpacity: number;
+
   headerSize: HeaderSize;
 
   enableCollapsibleNotes: boolean;
@@ -258,6 +275,8 @@ function createDefaultSettings(): StickyNoteSettings {
   return {
     defaultFolder: "",
     defaultNoteColor: DEFAULT_COLOR,
+    windowOpacity: FULL_WINDOW_OPACITY,
+
     headerSize: "default",
 
     enableCollapsibleNotes: false,
@@ -284,6 +303,10 @@ interface StickyNoteWindow {
   document: Document;
   window: NativeBrowserWindow;
   observer?: MutationObserver;
+  // Opacity currently set on the native window, so that the refresh passes can
+  // skip the remote call while the setting is unchanged.
+  appliedOpacity?: number;
+
   trafficLightsHidden?: boolean;
 
   // Collapse state lives here rather than in the popout DOM: Obsidian rebuilds
@@ -312,6 +335,8 @@ interface NativeBrowserWindow {
   moveTop(): void;
   setParentWindow(parent: NativeBrowserWindow | null): void;
   setSkipTaskbar(skip: boolean): void;
+  setOpacity(opacity: number): void;
+  getOpacity(): number;
   close(): void;
   destroy(): void;
   getPosition(): [number, number];
@@ -333,6 +358,8 @@ export default class DesktopStickyNotesPlugin extends Plugin {
   private initializedLeaves = new WeakSet<WorkspaceLeaf>();
   private registeredGlobalShortcut: string | null = null;
   private shortcutRegistrationTimer: number | null = null;
+  private opacitySaveTimer: number | null = null;
+
   private settingsSaveTimer: number | null = null;
   private pendingStateCaptures = new Set<StickyNoteWindow>();
   private restoringPath: string | null = null;
@@ -360,6 +387,7 @@ export default class DesktopStickyNotesPlugin extends Plugin {
     this.unloaded = true;
     this.restoringPath = null;
     if (this.shortcutRegistrationTimer !== null) window.clearTimeout(this.shortcutRegistrationTimer);
+    this.flushWindowOpacitySave();
     this.unregisterGlobalToggleShortcut();
     // Quitting Obsidian is what restoring exists for, so every path is captured
     // here even though the window events already record it: the debounced write
@@ -371,6 +399,11 @@ export default class DesktopStickyNotesPlugin extends Plugin {
     for (const path of [...this.notesByPath.keys()]) this.rememberNoteStates(path);
     for (const note of [...this.allNotes()]) {
       this.rememberTopLevelPosition(note);
+      // The window is closed just below, so this matters only when that close
+      // does not go through: no window may outlive the plugin translucent with
+      // nothing left to restore it.
+      this.restoreWindowOpacity(note);
+
       // Restore the traffic lights in case the window outlives the close below.
       this.setTrafficLightsVisible(note, true);
 
@@ -403,6 +436,10 @@ export default class DesktopStickyNotesPlugin extends Plugin {
     this.settings = {
       defaultFolder: stored.defaultFolder ?? defaults.defaultFolder,
       defaultNoteColor: stored.defaultNoteColor ?? defaults.defaultNoteColor,
+      windowOpacity: isWindowOpacity(stored.windowOpacity)
+        ? normalizeWindowOpacity(stored.windowOpacity)
+        : defaults.windowOpacity,
+
       headerSize: isHeaderSize(stored.headerSize) ? stored.headerSize : defaults.headerSize,
 
       enableCollapsibleNotes: stored.enableCollapsibleNotes ?? defaults.enableCollapsibleNotes,
@@ -932,6 +969,7 @@ export default class DesktopStickyNotesPlugin extends Plugin {
     this.applyColor(note, this.noteColor(note.file.path), false);
     this.applyHeaderSize(note);
     this.configureWindowOwnership(note);
+    this.applyWindowOpacity(note);
     // The setting gates the collapsed branch as well: a note that is still
     // collapsed after the feature was switched off has no control left to
     // expand it, so its window must at least become resizable again.
@@ -1377,6 +1415,66 @@ export default class DesktopStickyNotesPlugin extends Plugin {
     }
   }
 
+  setWindowOpacity(opacity: number): void {
+    // Checked before normalizing: normalization coerces its argument, so a
+    // caller outside the type system could otherwise slip a string through.
+    if (!isWindowOpacity(opacity)) return;
+    const normalized = normalizeWindowOpacity(opacity);
+    if (normalized === this.settings.windowOpacity) return;
+    this.settings.windowOpacity = normalized;
+    for (const note of this.allNotes()) this.applyWindowOpacity(note);
+    this.scheduleWindowOpacitySave();
+  }
+
+  private scheduleWindowOpacitySave(): void {
+    // Obsidian releases before 1.5.9 report a slider value per drag step, and
+    // key repeat does so in every release. Overlapping saveData() calls have no
+    // guaranteed write order, so only the settled value is persisted.
+    if (this.opacitySaveTimer !== null) window.clearTimeout(this.opacitySaveTimer);
+    this.opacitySaveTimer = window.setTimeout(() => {
+      this.opacitySaveTimer = null;
+      void this.saveSettings();
+    }, 400);
+  }
+
+  private flushWindowOpacitySave(): void {
+    if (this.opacitySaveTimer === null) return;
+    window.clearTimeout(this.opacitySaveTimer);
+    this.opacitySaveTimer = null;
+    void this.saveSettings();
+  }
+
+  private applyWindowOpacity(note: StickyNoteWindow): void {
+    const opacity = this.settings.windowOpacity;
+    if (note.appliedOpacity === opacity) return;
+    // A window opens fully opaque, so the default setting needs no native call
+    // here. Returning to full opacity from a lower value still does, which is
+    // why the applied value is tracked rather than compared against the default.
+    if (note.appliedOpacity === undefined && opacity === FULL_WINDOW_OPACITY) {
+      note.appliedOpacity = opacity;
+      return;
+    }
+    this.setNativeOpacity(note.window, opacity);
+    // Recorded even when the call did not get through, so that a window with a
+    // dead remote proxy is not retried on every focus and layout pass.
+    note.appliedOpacity = opacity;
+  }
+
+  private restoreWindowOpacity(note: StickyNoteWindow): void {
+    if (note.appliedOpacity === undefined || note.appliedOpacity === FULL_WINDOW_OPACITY) return;
+    this.setNativeOpacity(note.window, FULL_WINDOW_OPACITY);
+    note.appliedOpacity = FULL_WINDOW_OPACITY;
+  }
+
+  private setNativeOpacity(nativeWindow: NativeBrowserWindow, opacity: number): void {
+    try {
+      if (nativeWindow.isDestroyed()) return;
+      nativeWindow.setOpacity(opacity);
+    } catch {
+      // The remote proxy becomes invalid as soon as the window closes.
+    }
+  }
+
   private noteColor(path: string): string {
     return this.settings.colorsByPath[path] ?? this.settings.defaultNoteColor;
   }
@@ -1688,6 +1786,11 @@ class DesktopStickyNotesSettingTab extends PluginSettingTab {
         render: (setting) => this.addDefaultColorControl(setting)
       },
       {
+        name: "Window opacity",
+        desc: "Opacity of every sticky-note window. Fully opaque by default.",
+        render: (setting) => this.addWindowOpacityControl(setting)
+      },
+      {
         name: "Header size",
         desc: "Height of the sticky-note header. Small and extra small also hide the window buttons on macOS when the window frame style is hidden.",
         render: (setting) => this.addHeaderSizeControl(setting)
@@ -1725,6 +1828,10 @@ class DesktopStickyNotesSettingTab extends PluginSettingTab {
     this.addDefaultColorControl(new Setting(containerEl)
       .setName("Default note color")
       .setDesc("Background color used for notes that do not have a saved custom color."));
+    this.addWindowOpacityControl(new Setting(containerEl)
+      .setName("Window opacity")
+      .setDesc("Opacity of every sticky-note window. Fully opaque by default."));
+
     this.addHeaderSizeControl(new Setting(containerEl)
       .setName("Header size")
       .setDesc("Height of the sticky-note header. Small and extra small also hide the window buttons on macOS when the window frame style is hidden."));
@@ -1765,6 +1872,14 @@ class DesktopStickyNotesSettingTab extends PluginSettingTab {
         this.plugin.settings.defaultNoteColor = value;
         await this.plugin.saveSettings();
       }));
+  }
+
+  private addWindowOpacityControl(setting: Setting): void {
+    setting.addSlider((slider) => slider
+      .setLimits(MIN_WINDOW_OPACITY, FULL_WINDOW_OPACITY, WINDOW_OPACITY_STEP)
+      .setDynamicTooltip()
+      .setValue(this.plugin.settings.windowOpacity)
+      .onChange((value) => this.plugin.setWindowOpacity(value)));
   }
 
   private addHeaderSizeControl(setting: Setting): void {
