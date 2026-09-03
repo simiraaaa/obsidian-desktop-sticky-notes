@@ -8,6 +8,11 @@ const DEFAULT_HEIGHT = 360;
 const WINDOW_NAME_PREFIX = "desktop-sticky-notes:";
 const LEGACY_DEFAULT_GLOBAL_SHORTCUT = "CommandOrControl+Alt+N";
 const SETTINGS_SAVE_DEBOUNCE_MS = 500;
+// How far ahead of a shutdown signal a window has to have closed for that
+// closing to be the user's own. The two arrive within a few milliseconds of
+// each other when Obsidian is quitting, so anything queued this long before the
+// signal was not part of it; the measured gap is three milliseconds.
+const SHUTDOWN_RACE_SLACK_MS = 250;
 const HEADER_MEASURE_ATTEMPTS = 20;
 const HEADER_MEASURE_INTERVAL_MS = 50;
 
@@ -329,7 +334,7 @@ export default class DesktopStickyNotesPlugin extends Plugin {
   // elapsed time negative or enormous. Null until Obsidian says anything.
   private shutdownSignalledAt: number | null = null;
   private unloadedAt: number | null = null;
-  private pendingDismissals = new Set<StickyNoteWindow>();
+  private pendingDismissals = new Map<StickyNoteWindow, number>();
   // Latched rather than timed out: a quit can be held open for as long as
   // another plugin's shutdown tasks take, and a window closing at the end of
   // that is still part of the quit. What lowers it again is evidence that the
@@ -1669,15 +1674,21 @@ export default class DesktopStickyNotesPlugin extends Plugin {
   // then a quit has had far longer than those milliseconds to announce itself,
   // and a dismissal caught by one is dropped.
   private scheduleNoteDismissal(note: StickyNoteWindow): void {
-    this.pendingDismissals.add(note);
+    this.pendingDismissals.set(note, performance.now());
     this.scheduleSettingsSave();
   }
 
   private applyPendingDismissals(): void {
     const dismissed = [...this.pendingDismissals];
     this.pendingDismissals.clear();
-    if (this.shuttingDown) return;
-    for (const note of dismissed) this.dismissNoteState(note);
+    // Only the closings that could be part of the shutdown are dropped. A
+    // window closed well before Obsidian said anything was closed by the user,
+    // however little of the debounce was left when the shutdown arrived.
+    const signalledAt = this.shuttingDown ? this.shutdownSignalledAt ?? this.unloadedAt : null;
+    for (const [note, queuedAt] of dismissed) {
+      if (signalledAt !== null && queuedAt >= signalledAt - SHUTDOWN_RACE_SLACK_MS) continue;
+      this.dismissNoteState(note);
+    }
   }
 
   // Takes one window out of the saved list, which is what the user closing it
@@ -1781,9 +1792,9 @@ export default class DesktopStickyNotesPlugin extends Plugin {
       this.settingsSaveTimer = null;
     }
     this.capturePendingNoteStates();
-    // Unloading is the answer the deferred dismissals were waiting for: the
-    // windows were closing because Obsidian was, so they keep their entries.
-    this.pendingDismissals.clear();
+    // Unloading answers the deferred dismissals, but not all of them the same
+    // way: a window closed long enough before it was closed by the user.
+    this.applyPendingDismissals();
     // saveData() is asynchronous and onunload() cannot await it, so a change
     // made moments before Obsidian quits may not reach disk.
     void this.saveSettings();
