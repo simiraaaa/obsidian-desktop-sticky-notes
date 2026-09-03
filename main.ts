@@ -124,9 +124,10 @@ function isWindowOpacity(value: unknown): value is number {
 }
 
 function normalizeWindowOpacity(value: number): number {
-  // A range input steps in binary floating point, so a nominal 0.35 can arrive
-  // as 0.35000000000000003 and would be persisted in that form.
-  return Math.round(value * 100) / 100;
+  // Keeps the stored value on the slider's own grid, so that the persisted
+  // value, the slider position and the applied opacity always agree, whether
+  // the value came from the slider or from a hand-edited data.json.
+  return Math.round(Math.round(value / WINDOW_OPACITY_STEP) * WINDOW_OPACITY_STEP * 100) / 100;
 }
 
 interface StickyNoteSettings {
@@ -202,6 +203,7 @@ export default class DesktopStickyNotesPlugin extends Plugin {
   private initializedLeaves = new WeakSet<WorkspaceLeaf>();
   private registeredGlobalShortcut: string | null = null;
   private shortcutRegistrationTimer: number | null = null;
+  private opacitySaveTimer: number | null = null;
   private toggleInProgress = false;
 
   async onload(): Promise<void> {
@@ -218,9 +220,13 @@ export default class DesktopStickyNotesPlugin extends Plugin {
 
   onunload(): void {
     if (this.shortcutRegistrationTimer !== null) window.clearTimeout(this.shortcutRegistrationTimer);
+    this.flushWindowOpacitySave();
     this.unregisterGlobalToggleShortcut();
     for (const note of [...this.allNotes()]) {
       this.rememberTopLevelPosition(note);
+      // The window is closed just below, so this matters only when that close
+      // does not go through: no window may outlive the plugin translucent with
+      // nothing left to restore it.
       this.restoreWindowOpacity(note);
       note.observer?.disconnect();
       note.leaf.detach();
@@ -249,7 +255,9 @@ export default class DesktopStickyNotesPlugin extends Plugin {
     this.settings = {
       defaultFolder: stored.defaultFolder ?? defaults.defaultFolder,
       defaultNoteColor: stored.defaultNoteColor ?? defaults.defaultNoteColor,
-      windowOpacity: isWindowOpacity(stored.windowOpacity) ? stored.windowOpacity : defaults.windowOpacity,
+      windowOpacity: isWindowOpacity(stored.windowOpacity)
+        ? normalizeWindowOpacity(stored.windowOpacity)
+        : defaults.windowOpacity,
       globalToggleShortcuts,
       topLevelNotePath: stored.topLevelNotePath ?? defaults.topLevelNotePath,
       topLevelWindowPosition: stored.topLevelWindowPosition ?? defaults.topLevelWindowPosition,
@@ -562,8 +570,8 @@ export default class DesktopStickyNotesPlugin extends Plugin {
     document.body.classList.add("desktop-sticky-note");
     document.querySelector(".workspace-tab-header-container")?.remove();
     this.applyColor(note, this.noteColor(note.file.path), false);
-    this.applyWindowOpacity(note);
     this.configureWindowOwnership(note);
+    this.applyWindowOpacity(note);
     window.setResizable(true);
     this.addStickyActions(note);
     this.observePresentation(note);
@@ -711,12 +719,33 @@ export default class DesktopStickyNotesPlugin extends Plugin {
     }
   }
 
-  async setWindowOpacity(opacity: number): Promise<void> {
+  setWindowOpacity(opacity: number): void {
+    // Checked before normalizing: normalization coerces its argument, so a
+    // caller outside the type system could otherwise slip a string through.
+    if (!isWindowOpacity(opacity)) return;
     const normalized = normalizeWindowOpacity(opacity);
     if (normalized === this.settings.windowOpacity) return;
     this.settings.windowOpacity = normalized;
-    await this.saveSettings();
     for (const note of this.allNotes()) this.applyWindowOpacity(note);
+    this.scheduleWindowOpacitySave();
+  }
+
+  private scheduleWindowOpacitySave(): void {
+    // Obsidian releases before 1.5.9 report a slider value per drag step, and
+    // key repeat does so in every release. Overlapping saveData() calls have no
+    // guaranteed write order, so only the settled value is persisted.
+    if (this.opacitySaveTimer !== null) window.clearTimeout(this.opacitySaveTimer);
+    this.opacitySaveTimer = window.setTimeout(() => {
+      this.opacitySaveTimer = null;
+      void this.saveSettings();
+    }, 400);
+  }
+
+  private flushWindowOpacitySave(): void {
+    if (this.opacitySaveTimer === null) return;
+    window.clearTimeout(this.opacitySaveTimer);
+    this.opacitySaveTimer = null;
+    void this.saveSettings();
   }
 
   private applyWindowOpacity(note: StickyNoteWindow): void {
@@ -729,22 +758,24 @@ export default class DesktopStickyNotesPlugin extends Plugin {
       note.appliedOpacity = opacity;
       return;
     }
-    if (this.setNativeOpacity(note.window, opacity)) note.appliedOpacity = opacity;
+    this.setNativeOpacity(note.window, opacity);
+    // Recorded even when the call did not get through, so that a window with a
+    // dead remote proxy is not retried on every focus and layout pass.
+    note.appliedOpacity = opacity;
   }
 
   private restoreWindowOpacity(note: StickyNoteWindow): void {
     if (note.appliedOpacity === undefined || note.appliedOpacity === FULL_WINDOW_OPACITY) return;
-    if (this.setNativeOpacity(note.window, FULL_WINDOW_OPACITY)) note.appliedOpacity = FULL_WINDOW_OPACITY;
+    this.setNativeOpacity(note.window, FULL_WINDOW_OPACITY);
+    note.appliedOpacity = FULL_WINDOW_OPACITY;
   }
 
-  private setNativeOpacity(nativeWindow: NativeBrowserWindow, opacity: number): boolean {
+  private setNativeOpacity(nativeWindow: NativeBrowserWindow, opacity: number): void {
     try {
-      if (nativeWindow.isDestroyed()) return false;
+      if (nativeWindow.isDestroyed()) return;
       nativeWindow.setOpacity(opacity);
-      return true;
     } catch {
       // The remote proxy becomes invalid as soon as the window closes.
-      return false;
     }
   }
 
@@ -979,7 +1010,7 @@ class DesktopStickyNotesSettingTab extends PluginSettingTab {
     setting.addSlider((slider) => slider
       .setLimits(MIN_WINDOW_OPACITY, FULL_WINDOW_OPACITY, WINDOW_OPACITY_STEP)
       .setValue(this.plugin.settings.windowOpacity)
-      .onChange((value) => void this.plugin.setWindowOpacity(value)));
+      .onChange((value) => this.plugin.setWindowOpacity(value)));
   }
 
   private addGlobalShortcutControl(setting: Setting): () => void {

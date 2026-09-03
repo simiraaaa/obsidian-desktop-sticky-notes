@@ -13,13 +13,13 @@ An Obsidian desktop-only plugin that opens real Markdown files in resizable stic
 Each sticky-note window has controls for keeping it above other applications, selecting a color, switching between edit and reading views, and hiding it. Window contents are the underlying Obsidian Markdown file, so edits and previews stay in sync with the vault.
 
 > [!NOTE]
-> On Linux, **Keep on top** works when Obsidian runs under X11 or XWayland. Electron does not support the required always-on-top window state under native Wayland, so the pin control cannot change window stacking in a native Wayland session.
+> On Linux, **Keep on top** works when Obsidian runs under X11 or XWayland. Electron does not support the required always-on-top window state under native Wayland, so the pin control cannot change window stacking in a native Wayland session. Electron implements **Window opacity** on Windows and macOS only, so that setting has no visible effect on Linux.
 
 ## Settings
 
 - **Default notes folder** — where newly created sticky-note files are stored; defaults to the vault root.
 - **Default note color** — the initial background color for notes without a saved custom color.
-- **Window opacity** — how opaque every sticky-note window is, from 20% to fully opaque; the default keeps windows fully opaque. Electron applies window opacity on Windows and macOS, so a Linux desktop may show the windows fully opaque regardless of this setting.
+- **Window opacity** — how opaque every sticky-note window is, from 20% to fully opaque. The default keeps every window fully opaque, and the value applies to all sticky notes at once.
 - **Global toggle shortcut** — toggles the top-level sticky note even when Obsidian is in the background. Click the recorder and press the desired combination, or clear it to disable the shortcut. The default is `Win+F10` on Windows, `Super+F10` on Linux, and `Option+F10` on macOS. The plugin stores this setting separately for each operating system, so syncing a vault between computers does not translate one platform's shortcut into another platform's keys.
 - **Top-level note** — the Markdown file controlled by the toggle command and global shortcut.
 
