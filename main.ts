@@ -6,6 +6,9 @@ const DEFAULT_COLOR = "#fff3a3";
 const DEFAULT_WIDTH = 360;
 const DEFAULT_HEIGHT = 360;
 const WINDOW_NAME_PREFIX = "desktop-sticky-notes:";
+const MIN_WINDOW_OPACITY = 0.2;
+const FULL_WINDOW_OPACITY = 1;
+const WINDOW_OPACITY_STEP = 0.05;
 const LEGACY_DEFAULT_GLOBAL_SHORTCUT = "CommandOrControl+Alt+N";
 
 type DesktopPlatform = "linux" | "macos" | "windows";
@@ -115,9 +118,21 @@ function normalizeAcceleratorForPlatform(accelerator: string): string {
   }).join("+");
 }
 
+function isWindowOpacity(value: unknown): value is number {
+  return typeof value === "number" && Number.isFinite(value)
+    && value >= MIN_WINDOW_OPACITY && value <= FULL_WINDOW_OPACITY;
+}
+
+function normalizeWindowOpacity(value: number): number {
+  // A range input steps in binary floating point, so a nominal 0.35 can arrive
+  // as 0.35000000000000003 and would be persisted in that form.
+  return Math.round(value * 100) / 100;
+}
+
 interface StickyNoteSettings {
   defaultFolder: string;
   defaultNoteColor: string;
+  windowOpacity: number;
   globalToggleShortcuts: Record<DesktopPlatform, string>;
   topLevelNotePath: string | null;
   topLevelWindowPosition: WindowPosition | null;
@@ -139,6 +154,7 @@ function createDefaultSettings(): StickyNoteSettings {
   return {
     defaultFolder: "",
     defaultNoteColor: DEFAULT_COLOR,
+    windowOpacity: FULL_WINDOW_OPACITY,
     globalToggleShortcuts: { ...DEFAULT_GLOBAL_SHORTCUTS },
     topLevelNotePath: null,
     topLevelWindowPosition: null,
@@ -152,6 +168,9 @@ interface StickyNoteWindow {
   document: Document;
   window: NativeBrowserWindow;
   observer?: MutationObserver;
+  // Opacity currently set on the native window, so that the refresh passes can
+  // skip the remote call while the setting is unchanged.
+  appliedOpacity?: number;
 }
 
 interface NativeBrowserWindow {
@@ -170,6 +189,8 @@ interface NativeBrowserWindow {
   moveTop(): void;
   setParentWindow(parent: NativeBrowserWindow | null): void;
   setSkipTaskbar(skip: boolean): void;
+  setOpacity(opacity: number): void;
+  getOpacity(): number;
   close(): void;
   destroy(): void;
   getPosition(): [number, number];
@@ -200,6 +221,7 @@ export default class DesktopStickyNotesPlugin extends Plugin {
     this.unregisterGlobalToggleShortcut();
     for (const note of [...this.allNotes()]) {
       this.rememberTopLevelPosition(note);
+      this.restoreWindowOpacity(note);
       note.observer?.disconnect();
       note.leaf.detach();
       this.forceCloseWindow(note.window);
@@ -227,6 +249,7 @@ export default class DesktopStickyNotesPlugin extends Plugin {
     this.settings = {
       defaultFolder: stored.defaultFolder ?? defaults.defaultFolder,
       defaultNoteColor: stored.defaultNoteColor ?? defaults.defaultNoteColor,
+      windowOpacity: isWindowOpacity(stored.windowOpacity) ? stored.windowOpacity : defaults.windowOpacity,
       globalToggleShortcuts,
       topLevelNotePath: stored.topLevelNotePath ?? defaults.topLevelNotePath,
       topLevelWindowPosition: stored.topLevelWindowPosition ?? defaults.topLevelWindowPosition,
@@ -539,6 +562,7 @@ export default class DesktopStickyNotesPlugin extends Plugin {
     document.body.classList.add("desktop-sticky-note");
     document.querySelector(".workspace-tab-header-container")?.remove();
     this.applyColor(note, this.noteColor(note.file.path), false);
+    this.applyWindowOpacity(note);
     this.configureWindowOwnership(note);
     window.setResizable(true);
     this.addStickyActions(note);
@@ -684,6 +708,43 @@ export default class DesktopStickyNotesPlugin extends Plugin {
     if (persist) {
       this.settings.colorsByPath[note.file.path] = color;
       void this.saveSettings();
+    }
+  }
+
+  async setWindowOpacity(opacity: number): Promise<void> {
+    const normalized = normalizeWindowOpacity(opacity);
+    if (normalized === this.settings.windowOpacity) return;
+    this.settings.windowOpacity = normalized;
+    await this.saveSettings();
+    for (const note of this.allNotes()) this.applyWindowOpacity(note);
+  }
+
+  private applyWindowOpacity(note: StickyNoteWindow): void {
+    const opacity = this.settings.windowOpacity;
+    if (note.appliedOpacity === opacity) return;
+    // A window opens fully opaque, so the default setting needs no native call
+    // here. Returning to full opacity from a lower value still does, which is
+    // why the applied value is tracked rather than compared against the default.
+    if (note.appliedOpacity === undefined && opacity === FULL_WINDOW_OPACITY) {
+      note.appliedOpacity = opacity;
+      return;
+    }
+    if (this.setNativeOpacity(note.window, opacity)) note.appliedOpacity = opacity;
+  }
+
+  private restoreWindowOpacity(note: StickyNoteWindow): void {
+    if (note.appliedOpacity === undefined || note.appliedOpacity === FULL_WINDOW_OPACITY) return;
+    if (this.setNativeOpacity(note.window, FULL_WINDOW_OPACITY)) note.appliedOpacity = FULL_WINDOW_OPACITY;
+  }
+
+  private setNativeOpacity(nativeWindow: NativeBrowserWindow, opacity: number): boolean {
+    try {
+      if (nativeWindow.isDestroyed()) return false;
+      nativeWindow.setOpacity(opacity);
+      return true;
+    } catch {
+      // The remote proxy becomes invalid as soon as the window closes.
+      return false;
     }
   }
 
@@ -852,6 +913,11 @@ class DesktopStickyNotesSettingTab extends PluginSettingTab {
         render: (setting) => this.addDefaultColorControl(setting)
       },
       {
+        name: "Window opacity",
+        desc: "Opacity of every sticky-note window. Fully opaque by default.",
+        render: (setting) => this.addWindowOpacityControl(setting)
+      },
+      {
         name: "Global toggle shortcut",
         desc: "System-wide shortcut for toggling the top-level sticky note. Click the shortcut, press a new combination, or press escape to cancel.",
         render: (setting) => this.addGlobalShortcutControl(setting)
@@ -874,6 +940,9 @@ class DesktopStickyNotesSettingTab extends PluginSettingTab {
     this.addDefaultColorControl(new Setting(containerEl)
       .setName("Default note color")
       .setDesc("Background color used for notes that do not have a saved custom color."));
+    this.addWindowOpacityControl(new Setting(containerEl)
+      .setName("Window opacity")
+      .setDesc("Opacity of every sticky-note window. Fully opaque by default."));
     this.addGlobalShortcutControl(new Setting(containerEl)
       .setName("Global toggle shortcut")
       .setDesc("System-wide shortcut for toggling the top-level sticky note. Click the shortcut, press a new combination, or press escape to cancel."));
@@ -904,6 +973,13 @@ class DesktopStickyNotesSettingTab extends PluginSettingTab {
         this.plugin.settings.defaultNoteColor = value;
         await this.plugin.saveSettings();
       }));
+  }
+
+  private addWindowOpacityControl(setting: Setting): void {
+    setting.addSlider((slider) => slider
+      .setLimits(MIN_WINDOW_OPACITY, FULL_WINDOW_OPACITY, WINDOW_OPACITY_STEP)
+      .setValue(this.plugin.settings.windowOpacity)
+      .onChange((value) => void this.plugin.setWindowOpacity(value)));
   }
 
   private addGlobalShortcutControl(setting: Setting): () => void {
