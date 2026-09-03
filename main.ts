@@ -957,7 +957,6 @@ export default class DesktopStickyNotesPlugin extends Plugin {
     } else {
       this.collapseNote(note);
     }
-    this.rememberNoteState(note);
   }
 
   private collapseNote(note: StickyNoteWindow): void {
@@ -997,6 +996,7 @@ export default class DesktopStickyNotesPlugin extends Plugin {
     // A collapsed window must not be dragged to a new height, which would
     // silently replace the height that expanding is supposed to restore.
     window.setResizable(false);
+    this.rememberNoteState(note);
   }
 
   private abandonCollapse(note: StickyNoteWindow): void {
@@ -1024,6 +1024,9 @@ export default class DesktopStickyNotesPlugin extends Plugin {
     this.applyCollapseClasses(note);
     window.setResizable(true);
     window.setContentSize(width, height);
+    // Recorded from here rather than from the collapse button, so that
+    // expanding every note when the feature is switched off is recorded too.
+    this.rememberNoteState(note);
   }
 
   private applyCollapseClasses(note: StickyNoteWindow): void {
