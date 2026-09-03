@@ -688,12 +688,17 @@ export default class DesktopStickyNotesPlugin extends Plugin {
     if (!this.settings.restoreNotesOnStartup) return;
     let failures = 0;
     let collapsingUnsupported = false;
-    for (const [path, savedWindows] of Object.entries(this.settings.savedWindowsByPath)) {
+    // The list is read again for every note rather than iterated from one
+    // snapshot: reopening a note hands control back, and in that time entries
+    // can be added, removed, or moved to another path by a rename. Paths are
+    // remembered so that a list which keeps changing still terminates.
+    const attempted = new Set<string>();
+    for (;;) {
       if (this.unloaded) return;
-      // Restoring hands control back between windows, so an entry that was
-      // hidden in the meantime must not be reopened from the list this started
-      // with.
-      if (!(path in this.settings.savedWindowsByPath)) continue;
+      const path = Object.keys(this.settings.savedWindowsByPath).find((candidate) => !attempted.has(candidate));
+      if (path === undefined) break;
+      attempted.add(path);
+      const savedWindows = this.settings.savedWindowsByPath[path];
       // The top-level note has its own toggle and its own saved position. It is
       // kept out of the list when it is written, so an entry here means the two
       // settings went out of step, not that it should be reopened.
@@ -701,8 +706,15 @@ export default class DesktopStickyNotesPlugin extends Plugin {
       const file = this.app.vault.getAbstractFileByPath(path);
       // An entry whose file is missing right now is kept rather than dropped:
       // the same vault can be opened where that file has not been synced yet.
-      if (!(file instanceof TFile) || this.notesByPath.has(path)) continue;
-      const reopened = this.adoptablePopoutLeaves(path, savedWindows.length);
+      if (!(file instanceof TFile)) continue;
+      // A note that is already open, because the user opened it by hand before
+      // the loop reached it, accounts for as many of its saved windows. Only
+      // the rest are opened, so that the note ends up with the number of
+      // windows it was saved with rather than being skipped at one.
+      const alreadyOpen = this.notesByPath.get(path)?.size ?? 0;
+      const missing = savedWindows.slice(alreadyOpen);
+      if (!missing.length) continue;
+      const reopened = this.adoptablePopoutLeaves(path, missing.length);
       let restored = 0;
       // Recording a note snapshots every window it is open in, which while this
       // list is only half reopened would replace it with that half. Only this
@@ -710,7 +722,7 @@ export default class DesktopStickyNotesPlugin extends Plugin {
       // those notes have to keep recording for that to take effect.
       this.restoringPath = path;
       try {
-        for (const [index, saved] of savedWindows.entries()) {
+        for (const [index, saved] of missing.entries()) {
           // Rechecked for every window, not once for the note: opening one
           // hands control back, and in that time the note can be hidden, its
           // file deleted or renamed, or it can become the top-level note.
@@ -751,7 +763,7 @@ export default class DesktopStickyNotesPlugin extends Plugin {
       // re-recorded. Any other snapshot would replace the saved layout with
       // what happened to work, so a note that fell short keeps the list it was
       // restored from and tries again from it next time.
-      if (restored === savedWindows.length) this.rememberNoteStates(path);
+      if (restored === missing.length) this.rememberNoteStates(path);
     }
     // A restore that fails for every note is otherwise indistinguishable from
     // the feature not running at all.
@@ -1503,14 +1515,18 @@ export default class DesktopStickyNotesPlugin extends Plugin {
       return;
     }
     const windows = this.noteWindowStates(path);
+    if (!windows) return;
     // A snapshot may grow the list but never shrink it. Windows disappear for
     // reasons the plugin never observes as such, and by the time it looks they
     // are simply not there: Obsidian quitting, the window manager, a restore
     // that stopped halfway. Those are exactly the windows this feature exists
     // to bring back, and a dropped one cannot be recovered, while a stale one
     // costs a single hide. Hiding a note is the one way a window leaves.
-    if (!windows || windows.length < (this.settings.savedWindowsByPath[path]?.length ?? 0)) return;
-    this.settings.savedWindowsByPath[path] = windows;
+    // The entries with no window left to describe them keep what they last
+    // held, so that the windows still open go on recording their own state
+    // instead of the note freezing until its count matches again.
+    const previous = this.settings.savedWindowsByPath[path] ?? [];
+    this.settings.savedWindowsByPath[path] = [...windows, ...previous.slice(windows.length)];
   }
 
   // Null when a window could not be read. Its state is then unknown rather than
