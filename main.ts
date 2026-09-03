@@ -678,7 +678,12 @@ export default class DesktopStickyNotesPlugin extends Plugin {
     return true;
   }
 
+  // The button updates skip work when nothing changed: setIcon() replaces the
+  // icon element, and an in-place refresh during a click must leave the
+  // element the mouse went down on in place, or the click is dropped again.
   private updatePinButton(button: HTMLElement, pinned: boolean): void {
+    if (button.dataset.pinned === String(pinned)) return;
+    button.dataset.pinned = String(pinned);
     setIcon(button, pinned ? "pin-off" : "pin");
     setTooltip(button, pinned ? "Stop keeping on top" : "Keep on top");
   }
@@ -697,6 +702,8 @@ export default class DesktopStickyNotesPlugin extends Plugin {
   }
 
   private updateModeButton(button: HTMLElement, mode: string): void {
+    if (button.dataset.mode === mode) return;
+    button.dataset.mode = mode;
     const editing = mode === "source";
     setIcon(button, editing ? "book-open" : "pencil");
     setTooltip(button, editing ? "Switch to reading view" : "Switch to edit mode");
