@@ -8,14 +8,6 @@ const DEFAULT_HEIGHT = 360;
 const WINDOW_NAME_PREFIX = "desktop-sticky-notes:";
 const LEGACY_DEFAULT_GLOBAL_SHORTCUT = "CommandOrControl+Alt+N";
 const SETTINGS_SAVE_DEBOUNCE_MS = 500;
-// Obsidian says it is going down a few milliseconds before the sticky windows
-// begin to close, so the news is only current for a moment. This is far longer
-// than that, which absorbs a signal that arrives late or a row of windows
-// closing one after another, and short enough that a window the user closes
-// after cancelling a quit is not counted as part of it. Erring long is the safe
-// direction: keeping a window the user meant to be rid of costs one hide, while
-// dropping one they meant to keep cannot be undone.
-const SHUTDOWN_SIGNAL_WINDOW_MS = 2000;
 const HEADER_MEASURE_ATTEMPTS = 20;
 const HEADER_MEASURE_INTERVAL_MS = 50;
 
@@ -332,16 +324,33 @@ export default class DesktopStickyNotesPlugin extends Plugin {
   private pendingStateCaptures = new Set<StickyNoteWindow>();
   private restoringId: string | null = null;
   private unloaded = false;
-  private shutdownSignalledAt = 0;
+  private shutdownLatched = false;
+  // Monotonic, so that a clock the system adjusts underneath cannot turn an
+  // elapsed time negative or enormous. Null until Obsidian says anything.
+  private shutdownSignalledAt: number | null = null;
+  private unloadedAt: number | null = null;
   private pendingDismissals = new Set<StickyNoteWindow>();
-  private readonly markShuttingDown = () => { this.shutdownSignalledAt = Date.now(); };
+  // Latched rather than timed out: a quit can be held open for as long as
+  // another plugin's shutdown tasks take, and a window closing at the end of
+  // that is still part of the quit. What lowers it again is evidence that the
+  // quit did not happen, below.
+  private readonly markShuttingDown = () => {
+    this.shutdownLatched = true;
+    this.shutdownSignalledAt = performance.now();
+  };
+  // Obsidian only stays interactive if it is not going anywhere, so a click or
+  // a keypress after the signal says the quit was called off. Closing a window
+  // through its frame without touching anything else first is then read as part
+  // of the quit and keeps its entry, which one hide undoes; the reverse, losing
+  // every window because a quit was misread, cannot be undone.
+  private readonly releaseShutdownLatch = () => { this.shutdownLatched = false; };
   private toggleInProgress = false;
 
   // Whether Obsidian is on its way out, so that a sticky window closing now is
   // not the user being rid of it. Unloading is the end of that road rather than
   // a state beside it, so it counts as well.
   private get shuttingDown(): boolean {
-    return this.unloaded || Date.now() - this.shutdownSignalledAt < SHUTDOWN_SIGNAL_WINDOW_MS;
+    return this.unloaded || this.shutdownLatched;
   }
 
   async onload(): Promise<void> {
@@ -368,14 +377,18 @@ export default class DesktopStickyNotesPlugin extends Plugin {
     this.registerDomEvent(window, "beforeunload", this.markShuttingDown);
     // Obsidian's own quit event crosses no process boundary, so it does not
     // depend on the main process's before-quit winning its race with the
-    // windows it is announcing the closure of.
+    // windows it is announcing the closure of. Its API says it is not
+    // guaranteed to run, so it stands beside the other two rather than
+    // replacing them.
     this.registerEvent(this.app.workspace.on("quit", this.markShuttingDown));
+    this.watchForCancelledShutdown(window);
   }
 
   onunload(): void {
     // Restoring runs across awaits and outlives this call. It stops at its next
     // step, and until then it must not suppress the capture below.
     this.unloaded = true;
+    this.unloadedAt = performance.now();
     try {
       electronApp.removeListener("before-quit", this.markShuttingDown);
     } catch {
@@ -1088,6 +1101,12 @@ export default class DesktopStickyNotesPlugin extends Plugin {
     const restore = () => this.scheduleRefreshNote(note);
     this.registerDomEvent(domWindow, "focus", restore);
     this.registerDomEvent(domWindow, "blur", restore);
+    this.watchForCancelledShutdown(domWindow);
+  }
+
+  private watchForCancelledShutdown(domWindow: Window): void {
+    this.registerDomEvent(domWindow, "pointerdown", this.releaseShutdownLatch);
+    this.registerDomEvent(domWindow, "keydown", this.releaseShutdownLatch);
   }
 
   private watchWindowGeometry(note: StickyNoteWindow): void {
