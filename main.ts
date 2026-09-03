@@ -377,7 +377,9 @@ export default class DesktopStickyNotesPlugin extends Plugin {
       defaultFolder: stored.defaultFolder ?? defaults.defaultFolder,
       defaultNoteColor: stored.defaultNoteColor ?? defaults.defaultNoteColor,
       enableCollapsibleNotes: stored.enableCollapsibleNotes ?? defaults.enableCollapsibleNotes,
-      restoreNotesOnStartup: stored.restoreNotesOnStartup ?? defaults.restoreNotesOnStartup,
+      restoreNotesOnStartup: typeof stored.restoreNotesOnStartup === "boolean"
+        ? stored.restoreNotesOnStartup
+        : defaults.restoreNotesOnStartup,
       globalToggleShortcuts,
       topLevelNotePath: stored.topLevelNotePath ?? defaults.topLevelNotePath,
       topLevelWindowPosition: stored.topLevelWindowPosition ?? defaults.topLevelWindowPosition,
@@ -847,6 +849,10 @@ export default class DesktopStickyNotesPlugin extends Plugin {
     // keeps its relative place when the display it lands on is not the size it
     // was saved on. The size is left alone: a sticky note is sized for the
     // note it shows, not for the screen it happens to be on.
+    // Only the size of the saved work area is stored, so its origin is taken to
+    // be the one in front of us now. That holds for a single display and for
+    // displays whose arrangement did not change; rearranging monitors shifts
+    // the reference, and the clamp below is what keeps the window reachable.
     const x = workArea.x + Math.round((saved.bounds.x - workArea.x) * (workArea.width / saved.workArea.width));
     const y = workArea.y + Math.round((saved.bounds.y - workArea.y) * (workArea.height / saved.workArea.height));
     // Whatever the conversion produced, the window has to end up somewhere the
