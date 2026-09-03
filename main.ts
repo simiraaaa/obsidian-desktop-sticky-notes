@@ -738,6 +738,8 @@ export default class DesktopStickyNotesPlugin extends Plugin {
             // The windows open one at a time so that each exists, and has been
             // placed and collapsed, before the next takes the foreground.
             const note = await this.reopenStickyNote(file, bounds, reopened[index]);
+            // Unloading refuses to open a window, which is not the note failing.
+            if (this.unloaded) return;
             if (!note) {
               failures++;
               continue;
@@ -815,11 +817,14 @@ export default class DesktopStickyNotesPlugin extends Plugin {
   private async reopenStickyNote(file: TFile, bounds: WindowBounds, reopened: WorkspaceLeaf | undefined): Promise<StickyNoteWindow | null> {
     // Adopting the window Obsidian already put on screen avoids opening a
     // second one for it; a window the saved list has no popout for is new.
-    // Adoption can fail when the native window behind the leaf cannot be found,
-    // which detaches that leaf; the saved window is then opened as a new one
-    // rather than being lost along with it.
-    const adopted = reopened ? this.initializeStickyLeaf(file, reopened) : null;
-    return adopted ?? this.openStickyNote(file, bounds);
+    const adopted = reopened ? this.initializeStickyLeaf(file, reopened, false) : null;
+    if (adopted) return adopted;
+    // Adoption fails when the native window behind the leaf cannot be found.
+    // The leaf is closed here rather than left beside the window opened for the
+    // saved state, and reporting is left to that open: from the outside the
+    // window came back, so the failure to reuse this one is not an error.
+    reopened?.detach();
+    return this.openStickyNote(file, bounds);
   }
 
   // The top-level note is never saved or restored, because its own toggle
@@ -1537,6 +1542,7 @@ export default class DesktopStickyNotesPlugin extends Plugin {
   // Null when a window could not be read. Its state is then unknown rather than
   // absent, and treating it as absent would drop a window that is on screen.
   private noteWindowStates(path: string): SavedNoteWindow[] | null {
+    this.untrackDestroyedWindows(path);
     const notes = this.notesByPath.get(path) ?? new Set<StickyNoteWindow>();
     const previous = this.settings.savedWindowsByPath[path];
     // Windows carry no identity, so a saved entry can only be matched to a live
@@ -1552,12 +1558,35 @@ export default class DesktopStickyNotesPlugin extends Plugin {
     return windows;
   }
 
+  // A window can be destroyed without its document unloading, which leaves the
+  // note tracked and its main-process listener attached. Every later snapshot
+  // of that note would stop at the window it can no longer read, so the note is
+  // let go of here instead.
+  private untrackDestroyedWindows(path: string): void {
+    for (const note of [...(this.notesByPath.get(path) ?? [])]) {
+      let destroyed = false;
+      try {
+        destroyed = note.window.isDestroyed();
+      } catch {
+        // An unusable proxy is as good as a destroyed window.
+        destroyed = true;
+      }
+      if (destroyed) this.untrackNote(note);
+    }
+  }
+
   // Hiding a note is the one way its windows leave the saved list, so this is
   // the only path allowed to shrink it. It also applies while the note is being
   // restored: closing a window that restoring has just put on screen has to
   // take effect rather than be undone by the rest of the loop.
   private dismissNoteStates(path: string): void {
     if (!this.settings.restoreNotesOnStartup) return;
+    // Same exclusion as captureNoteStates(): dismissing a window of the
+    // top-level note must not be the one thing that writes an entry for it.
+    if (path === this.settings.topLevelNotePath) {
+      this.forgetNoteStates(path);
+      return;
+    }
     if (!this.notesByPath.has(path)) {
       this.forgetNoteStates(path);
       return;
@@ -1621,6 +1650,9 @@ export default class DesktopStickyNotesPlugin extends Plugin {
   // a whole drag comes down to one snapshot and one write, both taken here once
   // the movement has settled.
   private scheduleSettingsSave(): void {
+    // Unloading has already flushed the pending write, and a timer armed after
+    // that has nothing left to clear it or to save on behalf of.
+    if (this.unloaded) return;
     if (this.settingsSaveTimer !== null) window.clearTimeout(this.settingsSaveTimer);
     this.settingsSaveTimer = window.setTimeout(() => {
       this.settingsSaveTimer = null;
@@ -1629,10 +1661,13 @@ export default class DesktopStickyNotesPlugin extends Plugin {
     }, SETTINGS_SAVE_DEBOUNCE_MS);
   }
 
+  // Unloading is the last chance to write, so this does not depend on a write
+  // already being due: scheduling one is refused from here on.
   private flushSettingsSave(): void {
-    if (this.settingsSaveTimer === null) return;
-    window.clearTimeout(this.settingsSaveTimer);
-    this.settingsSaveTimer = null;
+    if (this.settingsSaveTimer !== null) {
+      window.clearTimeout(this.settingsSaveTimer);
+      this.settingsSaveTimer = null;
+    }
     this.capturePendingNoteStates();
     // saveData() is asynchronous and onunload() cannot await it, so a change
     // made moments before Obsidian quits may not reach disk.
