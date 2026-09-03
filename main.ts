@@ -8,6 +8,8 @@ const DEFAULT_HEIGHT = 360;
 const WINDOW_NAME_PREFIX = "desktop-sticky-notes:";
 const LEGACY_DEFAULT_GLOBAL_SHORTCUT = "CommandOrControl+Alt+N";
 const SETTINGS_SAVE_DEBOUNCE_MS = 500;
+const HEADER_MEASURE_ATTEMPTS = 20;
+const HEADER_MEASURE_INTERVAL_MS = 50;
 
 type DesktopPlatform = "linux" | "macos" | "windows";
 
@@ -58,6 +60,10 @@ const ACCELERATOR_KEYS_BY_CODE: Record<string, string> = {
   NumpadMultiply: "nummult",
   NumpadDivide: "numdiv"
 };
+
+function clamp(value: number, min: number, max: number): number {
+  return Math.min(Math.max(value, min), max);
+}
 
 function acceleratorKeyForEvent(event: KeyboardEvent): string | null {
   if (/^Key[A-Z]$/.test(event.code)) return event.code.slice(3);
@@ -299,6 +305,9 @@ export default class DesktopStickyNotesPlugin extends Plugin {
     this.registerGlobalToggleShortcut();
     this.registerEvent(this.app.workspace.on("active-leaf-change", () => this.scheduleRefreshAllNotes()));
     this.registerEvent(this.app.workspace.on("layout-change", () => this.scheduleRefreshAllNotes()));
+    // Runs after closeStaleStickyWindows() has removed the popouts Obsidian
+    // restored on its own, so the notes reopened here are the only ones left.
+    this.app.workspace.onLayoutReady(() => void this.restoreSavedNotes());
   }
 
   onunload(): void {
@@ -639,6 +648,74 @@ export default class DesktopStickyNotesPlugin extends Plugin {
     await leaf.openFile(file, { active: true });
 
     return this.initializeStickyLeaf(file, leaf);
+  }
+
+  private async restoreSavedNotes(): Promise<void> {
+    if (!this.settings.restoreNotesOnStartup) return;
+    for (const [path, saved] of Object.entries(this.settings.savedWindowsByPath)) {
+      const file = this.app.vault.getAbstractFileByPath(path);
+      // An entry whose file is missing right now is kept rather than dropped:
+      // the same vault can be opened where that file has not been synced yet.
+      if (!(file instanceof TFile) || this.notesByPath.has(path)) continue;
+      try {
+        const bounds = this.boundsOnCurrentDisplay(saved);
+        // The notes open one at a time so that each window exists, and has been
+        // placed and collapsed, before the next one takes over the foreground.
+        const note = await this.openStickyNote(file, bounds);
+        if (note) await this.applySavedWindow(note, saved, bounds);
+      } catch {
+        // One note that cannot be reopened must not stop the remaining ones.
+      }
+    }
+  }
+
+  private async applySavedWindow(note: StickyNoteWindow, saved: SavedNoteWindow, bounds: WindowBounds): Promise<void> {
+    if (note.window.isDestroyed()) return;
+    // openPopoutLeaf() was given the same rectangle, but it sizes the web
+    // contents, so the window frame is only accounted for here.
+    note.window.setBounds(bounds);
+    if (saved.isPinned) this.setNotePinned(note, true);
+    if (saved.isCollapsed && this.settings.enableCollapsibleNotes) await this.collapseRestoredNote(note);
+    this.rememberNoteState(note);
+    // The controls were built before the window was pinned or collapsed, so
+    // they are refreshed to show the state that has just been applied.
+    this.scheduleRefreshNote(note);
+  }
+
+  private async collapseRestoredNote(note: StickyNoteWindow): Promise<void> {
+    // collapseNote() needs the rendered height of the header and tells the user
+    // that collapsing is unsupported when it cannot measure one. A window that
+    // has only just opened may not have laid out its header yet, so the
+    // collapse waits for a usable measurement instead of reporting a failure.
+    for (let attempt = 0; attempt < HEADER_MEASURE_ATTEMPTS; attempt++) {
+      if (note.window.isDestroyed() || !this.isTracked(note)) return;
+      if (this.collapsedHeight(note) !== null) {
+        this.collapseNote(note);
+        return;
+      }
+      await sleep(HEADER_MEASURE_INTERVAL_MS);
+    }
+  }
+
+  private boundsOnCurrentDisplay(saved: SavedNoteWindow): WindowBounds {
+    const { workArea } = screen.getDisplayMatching(saved.bounds);
+    // The position is rescaled around the work area's origin so that a note
+    // keeps its relative place when the display it lands on is not the size it
+    // was saved on. The size is left alone: a sticky note is sized for the
+    // note it shows, not for the screen it happens to be on.
+    const x = workArea.x + Math.round((saved.bounds.x - workArea.x) * (workArea.width / saved.workArea.width));
+    const y = workArea.y + Math.round((saved.bounds.y - workArea.y) * (workArea.height / saved.workArea.height));
+    // Whatever the conversion produced, the window has to end up somewhere the
+    // user can reach it, so it is pulled back inside the work area, and shrunk
+    // first when it does not fit there at all.
+    const width = Math.min(saved.bounds.width, workArea.width);
+    const height = Math.min(saved.bounds.height, workArea.height);
+    return {
+      x: clamp(x, workArea.x, workArea.x + workArea.width - width),
+      y: clamp(y, workArea.y, workArea.y + workArea.height - height),
+      width,
+      height
+    };
   }
 
   private initialTopLevelBounds(file: TFile): WindowBounds | null {
