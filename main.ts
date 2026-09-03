@@ -674,10 +674,11 @@ export default class DesktopStickyNotesPlugin extends Plugin {
   // exactly when every control is there, so neither can consider a bar the
   // other would rebuild as intact.
   private findStickyActions(actions: Element | null): StickyActions | null {
-    const pin = actions?.querySelector<HTMLElement>(".desktop-sticky-note-pin");
-    const colorPicker = actions?.querySelector<HTMLInputElement>(".desktop-sticky-note-color-picker");
-    const mode = actions?.querySelector<HTMLElement>(".desktop-sticky-note-mode");
-    const hide = actions?.querySelector<HTMLElement>(".desktop-sticky-note-hide");
+    if (!actions) return null;
+    const pin = actions.querySelector<HTMLElement>(".desktop-sticky-note-pin");
+    const colorPicker = actions.querySelector<HTMLInputElement>(".desktop-sticky-note-color-picker");
+    const mode = actions.querySelector<HTMLElement>(".desktop-sticky-note-mode");
+    const hide = actions.querySelector<HTMLElement>(".desktop-sticky-note-hide");
     if (!pin || !colorPicker || !mode || !hide) return null;
     return { pin, colorPicker, mode, hide };
   }
@@ -697,8 +698,8 @@ export default class DesktopStickyNotesPlugin extends Plugin {
   // icon element, and an in-place refresh during a click must leave the
   // element the mouse went down on in place, or the click is dropped again.
   private updatePinButton(button: HTMLElement, pinned: boolean): void {
-    if (button.dataset.pinned === String(pinned)) return;
-    button.dataset.pinned = String(pinned);
+    if (button.dataset.desktopStickyNotePinned === String(pinned)) return;
+    button.dataset.desktopStickyNotePinned = String(pinned);
     setIcon(button, pinned ? "pin-off" : "pin");
     setTooltip(button, pinned ? "Stop keeping on top" : "Keep on top");
   }
@@ -717,8 +718,9 @@ export default class DesktopStickyNotesPlugin extends Plugin {
   }
 
   private updateModeButton(button: HTMLElement, mode: string): void {
-    if (button.dataset.mode === mode) return;
-    button.dataset.mode = mode;
+    // Same no-op guard as updatePinButton().
+    if (button.dataset.desktopStickyNoteMode === mode) return;
+    button.dataset.desktopStickyNoteMode = mode;
     const editing = mode === "source";
     setIcon(button, editing ? "book-open" : "pencil");
     setTooltip(button, editing ? "Switch to reading view" : "Switch to edit mode");
