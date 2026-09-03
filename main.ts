@@ -1515,18 +1515,20 @@ export default class DesktopStickyNotesPlugin extends Plugin {
       return;
     }
     const windows = this.noteWindowStates(path);
-    if (!windows) return;
     // A snapshot may grow the list but never shrink it. Windows disappear for
     // reasons the plugin never observes as such, and by the time it looks they
     // are simply not there: Obsidian quitting, the window manager, a restore
     // that stopped halfway. Those are exactly the windows this feature exists
     // to bring back, and a dropped one cannot be recovered, while a stale one
     // costs a single hide. Hiding a note is the one way a window leaves.
-    // The entries with no window left to describe them keep what they last
-    // held, so that the windows still open go on recording their own state
-    // instead of the note freezing until its count matches again.
-    const previous = this.settings.savedWindowsByPath[path] ?? [];
-    this.settings.savedWindowsByPath[path] = [...windows, ...previous.slice(windows.length)];
+    // A shorter snapshot is dropped whole rather than written over the leading
+    // entries: without an identity per window there is nothing to say which
+    // entries the surviving windows belong to, and writing them in order
+    // replaces the geometry of the window that went away with a copy of one
+    // that stayed. The note stops recording until its windows are all back,
+    // which reopening them at the next start does.
+    if (!windows || windows.length < (this.settings.savedWindowsByPath[path]?.length ?? 0)) return;
+    this.settings.savedWindowsByPath[path] = windows;
   }
 
   // Null when a window could not be read. Its state is then unknown rather than
