@@ -673,13 +673,13 @@ export default class DesktopStickyNotesPlugin extends Plugin {
       const file = this.app.vault.getAbstractFileByPath(path);
       // An entry whose file is missing right now is kept rather than dropped:
       // the same vault can be opened where that file has not been synced yet.
-      if (!(file instanceof TFile) || this.noteWindowExistsForPath(path)) continue;
+      if (!(file instanceof TFile) || this.notesByPath.has(path)) continue;
       const collapse = saved.isCollapsed && this.settings.enableCollapsibleNotes && !collapsingUnsupported;
       try {
         const bounds = this.boundsOnCurrentDisplay(saved);
         // The notes open one at a time so that each window exists, and has been
         // placed and collapsed, before the next one takes over the foreground.
-        const note = await this.openStickyNote(file, bounds);
+        const note = await this.reopenStickyNote(file, bounds);
         if (!note) continue;
         await this.applySavedWindow(note, saved, bounds, collapse);
         // Collapsing is refused by whole window managers rather than by single
@@ -722,21 +722,28 @@ export default class DesktopStickyNotesPlugin extends Plugin {
     }
   }
 
-  private noteWindowExistsForPath(path: string): boolean {
-    if (this.notesByPath.has(path)) return true;
-    // Obsidian can reopen a popout for this note from its own saved layout.
-    // Such a leaf carries none of the markers this plugin writes, so it is
-    // recognised by living in a document other than the main window's. Opening
-    // a second window for the same note cannot be undone except by hiding the
-    // windows one at a time, so the note is left to the window it already has.
+  private async reopenStickyNote(file: TFile, bounds: WindowBounds): Promise<StickyNoteWindow | null> {
+    // A sticky note that was open when Obsidian quit is part of the layout
+    // Obsidian saved, so Obsidian reopens it by itself as a plain popout, with
+    // none of the markers this plugin writes. That window is turned back into
+    // the sticky note instead of opening a second window for the same file.
+    // Obsidian restores one such popout per window the note was open in, and
+    // the saved state has room for one, so the others are closed.
+    const [reopened, ...duplicates] = this.plainPopoutLeavesForPath(file.path);
+    if (!reopened) return this.openStickyNote(file, bounds);
+    for (const leaf of duplicates) leaf.detach();
+    return this.initializeStickyLeaf(file, reopened);
+  }
+
+  private plainPopoutLeavesForPath(path: string): WorkspaceLeaf[] {
     const mainDocument = this.app.workspace.containerEl.ownerDocument;
-    let exists = false;
+    const leaves: WorkspaceLeaf[] = [];
     this.app.workspace.iterateAllLeaves((leaf) => {
       const { view } = leaf;
       if (!(view instanceof MarkdownView) || view.file?.path !== path) return;
-      if (view.containerEl.ownerDocument !== mainDocument) exists = true;
+      if (view.containerEl.ownerDocument !== mainDocument && !this.initializedLeaves.has(leaf)) leaves.push(leaf);
     });
-    return exists;
+    return leaves;
   }
 
   private boundsOnCurrentDisplay(saved: SavedNoteWindow): WindowBounds {
