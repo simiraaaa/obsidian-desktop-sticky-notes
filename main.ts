@@ -1540,6 +1540,7 @@ export default class DesktopStickyNotesPlugin extends Plugin {
     this.clearWindowMarker(note);
     this.untrackNote(note);
     this.dismissNoteState(note);
+    this.scheduleSettingsSave();
     note.leaf.detach();
     this.forceCloseWindow(note.window);
     void this.app.workspace.requestSaveLayout();
@@ -1666,8 +1667,6 @@ export default class DesktopStickyNotesPlugin extends Plugin {
     this.settings.savedWindowsByPath[path] = windows;
   }
 
-  // Hiding a window is the one way it leaves the saved list, and it takes only
-  // its own entry with it. The note is dropped once its last entry goes.
   // A window closing through its frame and Obsidian quitting are milliseconds
   // apart, and only their order tells them apart. Rather than settle that on
   // the spot, the dismissal waits for the write that is debounced anyway: by
@@ -1717,7 +1716,6 @@ export default class DesktopStickyNotesPlugin extends Plugin {
     } else {
       delete this.settings.savedWindowsByPath[path];
     }
-    this.scheduleSettingsSave();
   }
 
   private noteWindowState(note: StickyNoteWindow, previous: SavedNoteWindow | undefined): SavedNoteWindow | null {
