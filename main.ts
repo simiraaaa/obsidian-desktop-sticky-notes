@@ -1009,6 +1009,7 @@ class DesktopStickyNotesSettingTab extends PluginSettingTab {
   private addWindowOpacityControl(setting: Setting): void {
     setting.addSlider((slider) => slider
       .setLimits(MIN_WINDOW_OPACITY, FULL_WINDOW_OPACITY, WINDOW_OPACITY_STEP)
+      .setDynamicTooltip()
       .setValue(this.plugin.settings.windowOpacity)
       .onChange((value) => this.plugin.setWindowOpacity(value)));
   }
