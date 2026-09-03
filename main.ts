@@ -190,6 +190,11 @@ interface WindowSize {
 type WindowBounds = WindowPosition & WindowSize;
 
 interface SavedNoteWindow {
+  // Says which live window this entry belongs to, so that one window's state is
+  // never written into another's. It names nothing outside this list: not a
+  // note, not a display, not a machine, so a settings file stays valid wherever
+  // it is synced to.
+  id: string;
   // The bounds the window expands to, which for a collapsed note is not the
   // size it currently has on screen.
   bounds: WindowBounds;
@@ -242,11 +247,15 @@ function parseWindowBounds(value: unknown): WindowBounds | null {
 // an unusable one is dropped rather than repaired with guessed numbers.
 function parseSavedNoteWindow(value: unknown): SavedNoteWindow | null {
   if (typeof value !== "object" || value === null) return null;
-  const { bounds, workArea, isPinned, isCollapsed } = value as Record<string, unknown>;
+  const { id, bounds, workArea, isPinned, isCollapsed } = value as Record<string, unknown>;
   const parsedBounds = parseWindowBounds(bounds);
   const parsedWorkArea = parseWindowSize(workArea);
   if (!parsedBounds || !parsedWorkArea) return null;
   return {
+    // Entries written before windows were told apart carry no id. They describe
+    // a window worth reopening all the same, so they are named here rather than
+    // dropped; the name only has to be unique, not recognisable.
+    id: typeof id === "string" && id ? id : crypto.randomUUID(),
     bounds: parsedBounds,
     workArea: parsedWorkArea,
     isPinned: isPinned === true,
@@ -261,12 +270,14 @@ function parseSavedNoteWindows(value: unknown): Record<string, SavedNoteWindow[]
     // Before a note could be restored into several windows, a path held one
     // window rather than a list of them.
     const entries = Array.isArray(entry) ? entry : [entry];
-    const windows: SavedNoteWindow[] = [];
+    // Two entries claiming one window would both be updated by it and would
+    // reopen it twice, so a repeated id keeps only its last entry.
+    const windows = new Map<string, SavedNoteWindow>();
     for (const candidate of entries) {
       const parsed = parseSavedNoteWindow(candidate);
-      if (parsed) windows.push(parsed);
+      if (parsed) windows.set(parsed.id, parsed);
     }
-    if (windows.length) saved[path] = windows;
+    if (windows.size) saved[path] = [...windows.values()];
   }
   return saved;
 }
@@ -298,6 +309,9 @@ interface StickyActions {
 }
 
 interface StickyNoteWindow {
+  // Matches this window to its entry in the saved list. Assigned when the
+  // window opens, or taken from the entry when restoring reopens one.
+  id: string;
   file: TFile;
   leaf: WorkspaceLeaf;
   document: Document;
@@ -362,7 +376,7 @@ export default class DesktopStickyNotesPlugin extends Plugin {
 
   private settingsSaveTimer: number | null = null;
   private pendingStateCaptures = new Set<StickyNoteWindow>();
-  private restoringPath: string | null = null;
+  private restoringId: string | null = null;
   private unloaded = false;
   private toggleInProgress = false;
 
@@ -378,25 +392,25 @@ export default class DesktopStickyNotesPlugin extends Plugin {
     this.registerEvent(this.app.workspace.on("layout-change", () => this.scheduleRefreshAllNotes()));
     // Waits for the layout because Obsidian deserializes its own popouts as
     // part of it, and a note it reopened by itself must not be opened twice.
-    this.app.workspace.onLayoutReady(() => void this.restoreSavedNotes());
+    this.app.workspace.onLayoutReady(() => {
+      this.adoptTopLevelNotePopouts();
+      void this.restoreSavedNotes();
+    });
   }
 
   onunload(): void {
     // Restoring runs across awaits and outlives this call. It stops at its next
     // step, and until then it must not suppress the capture below.
     this.unloaded = true;
-    this.restoringPath = null;
+    this.restoringId = null;
     if (this.shortcutRegistrationTimer !== null) window.clearTimeout(this.shortcutRegistrationTimer);
     this.flushWindowOpacitySave();
     this.unregisterGlobalToggleShortcut();
-    // Quitting Obsidian is what restoring exists for, so every path is captured
-    // here even though the window events already record it: the debounced write
-    // may still be pending. It runs before the loop below closes anything,
-    // because a snapshot only holds the windows that are still open. Whether
-    // Obsidian closes the popouts before it unloads plugins is its own choice;
-    // when it does, this captures whatever is left of them and the rest is as
-    // recent as the last debounced write.
-    for (const path of [...this.notesByPath.keys()]) this.rememberNoteStates(path);
+    // Quitting Obsidian is what restoring exists for, so every window is
+    // captured here even though the window events already record it: the
+    // debounced write may still be pending. A window Obsidian closed before
+    // unloading the plugin is simply not among these, and keeps its entry.
+    for (const note of [...this.allNotes()]) this.rememberNoteState(note);
     for (const note of [...this.allNotes()]) {
       this.rememberTopLevelPosition(note);
       // The window is closed just below, so this matters only when that close
@@ -443,7 +457,9 @@ export default class DesktopStickyNotesPlugin extends Plugin {
       headerSize: isHeaderSize(stored.headerSize) ? stored.headerSize : defaults.headerSize,
 
       enableCollapsibleNotes: stored.enableCollapsibleNotes ?? defaults.enableCollapsibleNotes,
-      restoreNotesOnStartup: stored.restoreNotesOnStartup ?? defaults.restoreNotesOnStartup,
+      restoreNotesOnStartup: typeof stored.restoreNotesOnStartup === "boolean"
+        ? stored.restoreNotesOnStartup
+        : defaults.restoreNotesOnStartup,
       globalToggleShortcuts,
       topLevelNotePath: stored.topLevelNotePath ?? defaults.topLevelNotePath,
       topLevelWindowPosition: stored.topLevelWindowPosition ?? defaults.topLevelWindowPosition,
@@ -725,7 +741,7 @@ export default class DesktopStickyNotesPlugin extends Plugin {
     if (enabled) {
       // Notes that are already open would otherwise only enter the list once
       // they are moved, which makes the setting look like it did nothing.
-      for (const path of this.notesByPath.keys()) this.captureNoteStates(path);
+      for (const note of this.allNotes()) this.captureNoteState(note);
     } else {
       // Keeping the list while it is not used would restore a stale desktop
       // whenever the setting is switched back on.
@@ -740,33 +756,43 @@ export default class DesktopStickyNotesPlugin extends Plugin {
     await this.saveSettings();
     // A note that just stopped being the top-level note becomes an ordinary
     // sticky note and joins the restore list from here on.
-    for (const notePath of this.notesByPath.keys()) this.captureNoteStates(notePath);
+    for (const note of this.allNotes()) this.captureNoteState(note);
     this.scheduleSettingsSave();
     this.scheduleRefreshAllNotes();
     new Notice(path ? `Top-level sticky note: ${path}` : "Top-level sticky note cleared.");
   }
 
-  async openStickyNote(file: TFile, initialBounds?: WindowBounds): Promise<StickyNoteWindow | null> {
+  async openStickyNote(file: TFile, initialBounds?: WindowBounds, id?: string): Promise<StickyNoteWindow | null> {
     const bounds = initialBounds ?? this.initialTopLevelBounds(file);
     const leaf = this.app.workspace.openPopoutLeaf({
       size: bounds ? { width: bounds.width, height: bounds.height } : { width: DEFAULT_WIDTH, height: DEFAULT_HEIGHT },
       ...(bounds ? { x: bounds.x, y: bounds.y } : {})
     });
     await leaf.openFile(file, { active: true });
+    // Unloading while the file was opening leaves nothing to detach this window
+    // or the listener that tracking it would register in the main process.
+    if (this.unloaded) {
+      leaf.detach();
+      return null;
+    }
 
-    return this.initializeStickyLeaf(file, leaf);
+    return this.initializeStickyLeaf(file, leaf, { id });
   }
 
   private async restoreSavedNotes(): Promise<void> {
     if (!this.settings.restoreNotesOnStartup) return;
     let failures = 0;
     let collapsingUnsupported = false;
-    for (const [path, savedWindows] of Object.entries(this.settings.savedWindowsByPath)) {
+    // The list is read again for every note rather than iterated from one
+    // snapshot: reopening a note hands control back, and in that time entries
+    // can be added, removed, or moved to another path by a rename. Paths are
+    // remembered so that a list which keeps changing still terminates.
+    const attempted = new Set<string>();
+    for (;;) {
       if (this.unloaded) return;
-      // Restoring hands control back between windows, so an entry that was
-      // hidden in the meantime must not be reopened from the list this started
-      // with.
-      if (!(path in this.settings.savedWindowsByPath)) continue;
+      const path = Object.keys(this.settings.savedWindowsByPath).find((candidate) => !attempted.has(candidate));
+      if (path === undefined) break;
+      attempted.add(path);
       // The top-level note has its own toggle and its own saved position. It is
       // kept out of the list when it is written, so an entry here means the two
       // settings went out of step, not that it should be reopened.
@@ -774,43 +800,83 @@ export default class DesktopStickyNotesPlugin extends Plugin {
       const file = this.app.vault.getAbstractFileByPath(path);
       // An entry whose file is missing right now is kept rather than dropped:
       // the same vault can be opened where that file has not been synced yet.
-      if (!(file instanceof TFile) || this.notesByPath.has(path)) continue;
-      const reopened = this.adoptablePopoutLeaves(path, savedWindows.length);
-      let opened = 0;
-      // Recording a note snapshots every window it is open in, which while this
-      // list is only half reopened would replace it with that half. Only this
-      // note is held back: the user can still hide or move another one, and
-      // those notes have to keep recording for that to take effect.
-      this.restoringPath = path;
-      try {
-        for (const [index, saved] of savedWindows.entries()) {
+      if (!(file instanceof TFile)) continue;
+      // One window per entry. A window that is already open claims the entry
+      // whose name it carries, which is how a note the user opened by hand, or
+      // one this loop has already been through, is not opened a second time.
+      this.releaseDestroyedWindows(path);
+      const openIds = new Set([...(this.notesByPath.get(path) ?? [])].map((note) => note.id));
+      const missing = [...this.settings.savedWindowsByPath[path]].filter((saved) => !openIds.has(saved.id));
+      if (!missing.length) continue;
+      // Obsidian's own reopened popouts carry no name of ours, so they are
+      // handed out in order; that is the one place order still decides
+      // anything, and any beyond the entries left over are closed.
+      const reopened = this.adoptablePopoutLeaves(path, missing.length);
+      for (const saved of missing) {
+        // Rechecked for every window, not once for the note: opening one hands
+        // control back, and in that time the note can have its file deleted or
+        // renamed, or become the top-level note.
+        if (this.unloaded) return;
+        if (!this.noteIsStillRestorable(path, file)) break;
+        // Hiding a window removes only its own entry, so the others still stand.
+        if (!this.savedWindowExists(path, saved.id)) continue;
+        // The set this loop started from is stale between windows: a note
+        // opened by hand in the meantime takes over an entry nothing stood in
+        // for, which can be one this loop has not reached. Opening it again
+        // would leave two windows sharing a name and writing over each other.
+        if (this.windowExistsForId(path, saved.id)) continue;
+        // Whether this window was saved collapsed does not depend on another
+        // note's window manager having refused. Only the attempt does: a window
+        // left expanded either way must not have its saved flag replaced with
+        // the state it is stuck in.
+        const wantsCollapse = saved.isCollapsed && this.settings.enableCollapsibleNotes;
+        const collapse = wantsCollapse && !collapsingUnsupported;
+        // Held back until the window has been placed, pinned and collapsed:
+        // recording it before that would write the state it opened with over
+        // the state it is being restored to.
+        this.restoringId = saved.id;
+        try {
+          const bounds = this.boundsOnCurrentDisplay(saved);
+          // The windows open one at a time so that each exists, and has been
+          // placed and collapsed, before the next takes the foreground.
+          const note = await this.reopenStickyNote(file, bounds, saved.id, reopened.shift());
+          // Unloading refuses to open a window, which is not the note failing.
           if (this.unloaded) return;
-          const collapse = saved.isCollapsed && this.settings.enableCollapsibleNotes && !collapsingUnsupported;
-          try {
-            const bounds = this.boundsOnCurrentDisplay(saved);
-            // The windows open one at a time so that each exists, and has been
-            // placed and collapsed, before the next takes the foreground.
-            const note = await this.reopenStickyNote(file, bounds, reopened[index]);
-            if (!note) {
-              failures++;
-              continue;
-            }
-            opened++;
-            await this.applySavedWindow(note, saved, bounds, collapse);
-            // Collapsing is refused by whole window managers rather than by
-            // single windows, and every refusal warns the user. One is enough.
-            if (collapse && !note.isCollapsed) collapsingUnsupported = true;
-          } catch {
+          if (!note) {
             failures++;
+            continue;
           }
+          await this.applySavedWindow(note, saved, bounds, collapse);
+          if (note.window.isDestroyed()) {
+            failures++;
+            continue;
+          }
+          if (wantsCollapse && !note.isCollapsed) {
+            // Collapsing is refused by whole window managers rather than by
+            // single windows, and every refusal warns the user, so no further
+            // window is asked once one has been turned down. Restoring leaves
+            // this window's entry as it found it rather than recording the
+            // expanded state it is stuck in; moving the window still records
+            // it, because from then on expanded is simply what it is.
+            if (collapse) collapsingUnsupported = true;
+            this.pendingStateCaptures.delete(note);
+            continue;
+          }
+          // The hold is released and the window recorded, now that it is what
+          // its entry describes. Placement is not read back: wherever a window
+          // manager put the window is where the window is, and recording that
+          // is the point.
+          this.restoringId = null;
+          this.rememberNoteState(note);
+        } catch {
+          failures++;
+        } finally {
+          this.restoringId = null;
         }
-      } finally {
-        this.restoringPath = null;
       }
-      // Only a note that came back whole is re-recorded. Snapshotting a partial
-      // reopen would replace the saved layout with the windows that happened to
-      // make it, so a note that failed keeps the list to try again from.
-      if (opened === savedWindows.length) this.rememberNoteStates(path);
+      // Popouts left over because the loop stopped early, or skipped the
+      // entries they were meant for, have nothing to be turned into.
+      for (const surplus of reopened) surplus.detach();
     }
     // A restore that fails for every note is otherwise indistinguishable from
     // the feature not running at all.
@@ -856,11 +922,87 @@ export default class DesktopStickyNotesPlugin extends Plugin {
     return leaves;
   }
 
-  private async reopenStickyNote(file: TFile, bounds: WindowBounds, reopened: WorkspaceLeaf | undefined): Promise<StickyNoteWindow | null> {
+  private async reopenStickyNote(file: TFile, bounds: WindowBounds, id: string, reopened: WorkspaceLeaf | undefined): Promise<StickyNoteWindow | null> {
     // Adopting the window Obsidian already put on screen avoids opening a
     // second one for it; a window the saved list has no popout for is new.
-    if (reopened) return this.initializeStickyLeaf(file, reopened);
-    return this.openStickyNote(file, bounds);
+    // Either way it takes over the entry's name, so what it records from now on
+    // lands in that entry rather than in one of its own.
+    const adopted = reopened ? this.initializeStickyLeaf(file, reopened, { detachOnFailure: false, id }) : null;
+    if (adopted) return adopted;
+    // Adoption fails when the native window behind the leaf cannot be found.
+    // The leaf is closed here rather than left beside the window opened for the
+    // saved state, and reporting is left to that open: from the outside the
+    // window came back, so the failure to reuse this one is not an error.
+    reopened?.detach();
+    return this.openStickyNote(file, bounds, id);
+  }
+
+  // The top-level note is never saved or restored, because its own toggle
+  // decides when it is shown. Obsidian still reopens the popout it was in from
+  // its own layout, and left alone that is a plain popout the toggle does not
+  // recognise, so toggling opens a second window onto the same note. The window
+  // is adopted rather than closed: it is on screen either way, adopting it lets
+  // the toggle hide it as usual, and closing it would make a note the user left
+  // open disappear at startup without being asked.
+  private adoptTopLevelNotePopouts(): void {
+    const path = this.settings.topLevelNotePath;
+    if (!path) return;
+    const file = this.app.vault.getAbstractFileByPath(path);
+    if (!(file instanceof TFile)) return;
+    for (const leaf of this.plainPopoutLeavesForPath(path)) {
+      // A leaf whose native window cannot be found is left in place. The toggle
+      // still cannot see it, so it opens a second window onto the note, which
+      // is the very thing this avoids elsewhere; closing a window the user left
+      // open is the worse of the two, so it stays.
+      this.initializeStickyLeaf(file, leaf, { detachOnFailure: false });
+    }
+  }
+
+  // Reading a window is a call into the main process, which throws once that
+  // window is gone rather than answering. Everything that walks the open
+  // windows has to survive one of them having died, so the question is asked
+  // here and nowhere else.
+  private windowIsGone(note: StickyNoteWindow): boolean {
+    try {
+      return note.window.isDestroyed();
+    } catch {
+      // An unusable proxy is as good as a destroyed window.
+      return true;
+    }
+  }
+
+  // A window can be destroyed without its document unloading, which leaves the
+  // note tracked. Nothing notices on its own, because a window that is gone
+  // sends no events, and while it is tracked it goes on standing in for the
+  // saved entry it claimed, so the note gains an entry every time it is opened
+  // again. Asked before anything counts which entries are claimed.
+  private releaseDestroyedWindows(path: string): void {
+    for (const note of [...(this.notesByPath.get(path) ?? [])]) {
+      if (this.windowIsGone(note)) this.untrackNote(note);
+    }
+  }
+
+  private unclaimedWindowId(path: string): string | undefined {
+    this.releaseDestroyedWindows(path);
+    const openIds = new Set([...(this.notesByPath.get(path) ?? [])].map((note) => note.id));
+    return this.settings.savedWindowsByPath[path]?.find((saved) => !openIds.has(saved.id))?.id;
+  }
+
+  private savedWindowExists(path: string, id: string): boolean {
+    return this.settings.savedWindowsByPath[path]?.some((saved) => saved.id === id) ?? false;
+  }
+
+  private windowExistsForId(path: string, id: string): boolean {
+    for (const note of this.notesByPath.get(path) ?? []) {
+      if (note.id === id) return true;
+    }
+    return false;
+  }
+
+  private noteIsStillRestorable(path: string, file: TFile): boolean {
+    return path in this.settings.savedWindowsByPath
+      && path !== this.settings.topLevelNotePath
+      && this.app.vault.getAbstractFileByPath(path) === file;
   }
 
   private plainPopoutLeavesForPath(path: string): WorkspaceLeaf[] {
@@ -880,6 +1022,9 @@ export default class DesktopStickyNotesPlugin extends Plugin {
     // keeps its relative place when the display it lands on is not the size it
     // was saved on. The size is left alone: a sticky note is sized for the
     // note it shows, not for the screen it happens to be on.
+    // Only the size of the saved work area is stored, never its origin, so the
+    // origin in front of us now stands in for it. That holds while the displays
+    // are arranged as they were; rearranging them shifts the reference.
     const x = workArea.x + Math.round((saved.bounds.x - workArea.x) * (workArea.width / saved.workArea.width));
     const y = workArea.y + Math.round((saved.bounds.y - workArea.y) * (workArea.height / saved.workArea.height));
     // Whatever the conversion produced, the window has to end up somewhere the
@@ -903,7 +1048,13 @@ export default class DesktopStickyNotesPlugin extends Plugin {
     return { ...position, width: DEFAULT_WIDTH, height: DEFAULT_HEIGHT };
   }
 
-  private initializeStickyLeaf(file: TFile, leaf: WorkspaceLeaf, detachOnFailure = true): StickyNoteWindow | null {
+  private initializeStickyLeaf(file: TFile, leaf: WorkspaceLeaf, options: { detachOnFailure?: boolean; id?: string } = {}): StickyNoteWindow | null {
+    // A window opened without a name of its own takes over an entry that no
+    // window is standing in for. Otherwise closing a note with the window
+    // frame's own button, which by design keeps its entry, and opening it again
+    // would leave a new entry beside the old one every time, and every one of
+    // them would be reopened at the next start.
+    const { detachOnFailure = true, id = this.unclaimedWindowId(file.path) ?? crypto.randomUUID() } = options;
     if (this.initializedLeaves.has(leaf)) return null;
 
     // The view's ownerDocument is permanently tied to this popout. Obsidian's
@@ -933,13 +1084,13 @@ export default class DesktopStickyNotesPlugin extends Plugin {
       return null;
     }
 
-    const note: StickyNoteWindow = { file, leaf, document, window: browserWindow, isCollapsed: false };
+    const note: StickyNoteWindow = { id, file, leaf, document, window: browserWindow, isCollapsed: false };
     this.initializedLeaves.add(leaf);
     this.trackNote(note);
     this.prepareWindow(note);
     this.watchWindow(note, domWindow);
     this.watchWindowGeometry(note);
-    this.rememberNoteStates(file.path);
+    this.rememberNoteState(note);
     this.registerDomEvent(domWindow, "beforeunload", () => {
       this.rememberTopLevelPosition(note);
       // The saved list is deliberately not rebuilt here. A snapshot holds the
@@ -1150,7 +1301,7 @@ export default class DesktopStickyNotesPlugin extends Plugin {
 
     const pin = view.addAction("pin", "Keep on top", () => {
       this.setNotePinned(note, !note.window.isAlwaysOnTop());
-      this.rememberNoteStates(note.file.path);
+      this.rememberNoteState(note);
       this.updatePinButton(pin, note.window.isAlwaysOnTop());
     });
     pin.addClass("desktop-sticky-note-pin");
@@ -1225,7 +1376,7 @@ export default class DesktopStickyNotesPlugin extends Plugin {
     // A collapsed window must not be dragged to a new height, which would
     // silently replace the height that expanding is supposed to restore.
     window.setResizable(false);
-    this.rememberNoteStates(note.file.path);
+    this.rememberNoteState(note);
   }
 
   private abandonCollapse(note: StickyNoteWindow): void {
@@ -1255,7 +1406,7 @@ export default class DesktopStickyNotesPlugin extends Plugin {
     window.setContentSize(width, height);
     // Recorded from here rather than from the collapse button, so that
     // expanding every note when the feature is switched off is recorded too.
-    this.rememberNoteStates(note.file.path);
+    this.rememberNoteState(note);
   }
 
   private applyCollapseClasses(note: StickyNoteWindow): void {
@@ -1509,9 +1660,9 @@ export default class DesktopStickyNotesPlugin extends Plugin {
       if (domWindow) domWindow.name = "";
       leaf.detach();
     }
-    // Every window for this note has been dismissed, so the list is rebuilt
-    // from what is left, which is nothing.
-    this.rememberNoteStates(path);
+    // Every window for this note has been dismissed, so nothing is left to
+    // reopen.
+    this.forgetNoteStates(path);
     void this.app.workspace.requestSaveLayout();
   }
 
@@ -1519,10 +1670,7 @@ export default class DesktopStickyNotesPlugin extends Plugin {
     this.rememberTopLevelPosition(note);
     this.clearWindowMarker(note);
     this.untrackNote(note);
-    // Hiding is the one dismissal that shrinks the list: it is rebuilt from the
-    // windows that are still open, and the note leaves the list entirely once
-    // the last of them is hidden.
-    this.rememberNoteStates(note.file.path);
+    this.dismissNoteState(note);
     note.leaf.detach();
     this.forceCloseWindow(note.window);
     void this.app.workspace.requestSaveLayout();
@@ -1591,45 +1739,38 @@ export default class DesktopStickyNotesPlugin extends Plugin {
     return this.notesByPath.get(note.file.path)?.has(note) ?? false;
   }
 
-  private rememberNoteStates(path: string): void {
-    this.captureNoteStates(path);
+  private rememberNoteState(note: StickyNoteWindow): void {
+    this.captureNoteState(note);
     this.scheduleSettingsSave();
   }
 
   // Used by the window events, which arrive continuously while a window is
   // dragged. Reading a window's geometry means a blocking call into the main
-  // process for every property, so the events only mark the note and the
-  // debounced timer reads the windows once per movement.
+  // process for every property, so the events only mark the window and the
+  // debounced timer reads it once per movement.
   private scheduleNoteStateCapture(note: StickyNoteWindow): void {
     this.pendingStateCaptures.add(note);
     this.scheduleSettingsSave();
   }
 
   private capturePendingNoteStates(): void {
-    // Marked notes are resolved to paths first: a note is saved together with
-    // every other window on the same file, and dragging one window must not
-    // snapshot that file once per window.
-    const paths = new Set<string>();
     for (const note of [...this.pendingStateCaptures]) {
-      // A note whose windows are still being reopened stays marked rather than
-      // producing a snapshot of the part of its list that exists so far. The
-      // mark keeps until the next write, whether restoring records the note
-      // itself or a later event does.
-      if (note.file.path === this.restoringPath) continue;
       this.pendingStateCaptures.delete(note);
-      if (this.isTracked(note)) paths.add(note.file.path);
+      if (this.isTracked(note)) this.captureNoteState(note);
     }
-    for (const path of paths) this.captureNoteStates(path);
   }
 
-  // Replaces the saved list for one note with a snapshot of every window it is
-  // currently open in. Windows carry no identity of their own, so they cannot
-  // be updated one by one.
-  private captureNoteStates(path: string): void {
+  // Writes one window's state into its own entry, leaving every other entry for
+  // the same note alone. Nothing else has to be true for that to be safe: a
+  // window that vanished unobserved simply stops updating its entry and is
+  // reopened next time, and a note being restored fills its entries in as its
+  // windows come up.
+  private captureNoteState(note: StickyNoteWindow): void {
     if (!this.settings.restoreNotesOnStartup) return;
-    // Held back while this note's own windows are being reopened: its list is
-    // only partly on screen, and a snapshot would replace the list with that.
-    if (path === this.restoringPath) return;
+    // Held back while this window is being placed and pinned and collapsed:
+    // until that is done it is not yet the window the entry describes.
+    if (note.id === this.restoringId) return;
+    const path = note.file.path;
     // The top-level note is shown and hidden by its own toggle and keeps its
     // own saved position, so it is never part of the restore list. An entry
     // that predates it becoming the top-level note is dropped here.
@@ -1637,22 +1778,46 @@ export default class DesktopStickyNotesPlugin extends Plugin {
       delete this.settings.savedWindowsByPath[path];
       return;
     }
-    const notes = this.notesByPath.get(path) ?? new Set<StickyNoteWindow>();
-    const previous = this.settings.savedWindowsByPath[path];
-    // Windows carry no identity, so a saved entry can only be matched to a live
-    // window by position, and that only holds while their number is unchanged.
-    // A note that has gained or lost a window has no such match.
-    const matching = previous?.length === notes.size ? previous : undefined;
-    const windows: SavedNoteWindow[] = [];
-    for (const note of notes) {
-      const state = this.noteWindowState(note, matching?.[windows.length]);
-      if (state) windows.push(state);
+    if (this.windowIsGone(note)) {
+      // Dropping the stale reference stops the note being carried along by
+      // everything that walks the open windows. Its entry stays, so the window
+      // is reopened next time.
+      this.untrackNote(note);
+      return;
     }
-    if (windows.length) {
-      this.settings.savedWindowsByPath[path] = windows;
+    const windows = this.settings.savedWindowsByPath[path] ?? [];
+    const index = windows.findIndex((saved) => saved.id === note.id);
+    const state = this.noteWindowState(note, windows[index]);
+    if (!state) return;
+    if (index === -1) {
+      windows.push(state);
+    } else {
+      windows[index] = state;
+    }
+    this.settings.savedWindowsByPath[path] = windows;
+  }
+
+  // Hiding a window is the one way it leaves the saved list, and it takes only
+  // its own entry with it. The note is dropped once its last entry goes.
+  private dismissNoteState(note: StickyNoteWindow): void {
+    if (!this.settings.restoreNotesOnStartup) return;
+    const path = note.file.path;
+    // Same exclusion as captureNoteState(): the top-level note is never in the
+    // list, so hiding one of its windows takes the whole entry rather than
+    // leaving the rest of a list that should not be there.
+    if (path === this.settings.topLevelNotePath) {
+      this.forgetNoteStates(path);
+      return;
+    }
+    const windows = this.settings.savedWindowsByPath[path];
+    if (!windows) return;
+    const remaining = windows.filter((saved) => saved.id !== note.id);
+    if (remaining.length) {
+      this.settings.savedWindowsByPath[path] = remaining;
     } else {
       delete this.settings.savedWindowsByPath[path];
     }
+    this.scheduleSettingsSave();
   }
 
   private noteWindowState(note: StickyNoteWindow, previous: SavedNoteWindow | undefined): SavedNoteWindow | null {
@@ -1661,19 +1826,19 @@ export default class DesktopStickyNotesPlugin extends Plugin {
       if (!bounds) return null;
       const { width, height } = screen.getDisplayMatching(bounds).workArea;
       return {
+        id: note.id,
         bounds,
         workArea: { width, height },
         isPinned: note.window.isAlwaysOnTop(),
         // While the collapse feature is off no window can report itself
         // collapsed, so recording the flag would erase it for every note that
-        // was collapsed when the feature was switched off. The flag saved for
-        // this window is carried over instead, until a window is able to change
-        // it again.
+        // was collapsed when the feature was switched off. This window's own
+        // saved flag is carried over instead, until it can change it again.
         isCollapsed: this.settings.enableCollapsibleNotes ? note.isCollapsed : previous?.isCollapsed ?? false
       };
     } catch {
-      // The remote proxy becomes invalid as soon as a window closes, and a
-      // window that is already gone is not one to reopen.
+      // The remote proxy becomes invalid as soon as a window closes. The entry
+      // keeps what it last held, so the window is reopened next time.
       return null;
     }
   }
@@ -1707,6 +1872,9 @@ export default class DesktopStickyNotesPlugin extends Plugin {
   // a whole drag comes down to one snapshot and one write, both taken here once
   // the movement has settled.
   private scheduleSettingsSave(): void {
+    // Unloading has already flushed the pending write, and a timer armed after
+    // that has nothing left to clear it or to save on behalf of.
+    if (this.unloaded) return;
     if (this.settingsSaveTimer !== null) window.clearTimeout(this.settingsSaveTimer);
     this.settingsSaveTimer = window.setTimeout(() => {
       this.settingsSaveTimer = null;
@@ -1715,10 +1883,13 @@ export default class DesktopStickyNotesPlugin extends Plugin {
     }, SETTINGS_SAVE_DEBOUNCE_MS);
   }
 
+  // Unloading is the last chance to write, so this does not depend on a write
+  // already being due: scheduling one is refused from here on.
   private flushSettingsSave(): void {
-    if (this.settingsSaveTimer === null) return;
-    window.clearTimeout(this.settingsSaveTimer);
-    this.settingsSaveTimer = null;
+    if (this.settingsSaveTimer !== null) {
+      window.clearTimeout(this.settingsSaveTimer);
+      this.settingsSaveTimer = null;
+    }
     this.capturePendingNoteStates();
     // saveData() is asynchronous and onunload() cannot await it, so a change
     // made moments before Obsidian quits may not reach disk.
