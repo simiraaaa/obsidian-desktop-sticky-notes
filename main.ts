@@ -864,6 +864,11 @@ export default class DesktopStickyNotesPlugin extends Plugin {
     }
   }
 
+  private unclaimedWindowId(path: string): string | undefined {
+    const openIds = new Set([...(this.notesByPath.get(path) ?? [])].map((note) => note.id));
+    return this.settings.savedWindowsByPath[path]?.find((saved) => !openIds.has(saved.id))?.id;
+  }
+
   private savedWindowExists(path: string, id: string): boolean {
     return this.settings.savedWindowsByPath[path]?.some((saved) => saved.id === id) ?? false;
   }
@@ -918,7 +923,12 @@ export default class DesktopStickyNotesPlugin extends Plugin {
   }
 
   private initializeStickyLeaf(file: TFile, leaf: WorkspaceLeaf, options: { detachOnFailure?: boolean; id?: string } = {}): StickyNoteWindow | null {
-    const { detachOnFailure = true, id = crypto.randomUUID() } = options;
+    // A window opened without a name of its own takes over an entry that no
+    // window is standing in for. Otherwise closing a note with the window
+    // frame's own button, which by design keeps its entry, and opening it again
+    // would leave a new entry beside the old one every time, and every one of
+    // them would be reopened at the next start.
+    const { detachOnFailure = true, id = this.unclaimedWindowId(file.path) ?? crypto.randomUUID() } = options;
     if (this.initializedLeaves.has(leaf)) return null;
 
     // The view's ownerDocument is permanently tied to this popout. Obsidian's
