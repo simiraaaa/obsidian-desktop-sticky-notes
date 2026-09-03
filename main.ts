@@ -336,8 +336,11 @@ export default class DesktopStickyNotesPlugin extends Plugin {
     this.unregisterGlobalToggleShortcut();
     // Quitting Obsidian is what restoring exists for, so every path is captured
     // here even though the window events already record it: the debounced write
-    // may still be pending. It happens before the loop below closes anything,
-    // because a snapshot only holds the windows that are still open.
+    // may still be pending. It runs before the loop below closes anything,
+    // because a snapshot only holds the windows that are still open. Whether
+    // Obsidian closes the popouts before it unloads plugins is its own choice;
+    // when it does, this captures whatever is left of them and the rest is as
+    // recent as the last debounced write.
     for (const path of [...this.notesByPath.keys()]) this.rememberNoteStates(path);
     for (const note of [...this.allNotes()]) {
       this.rememberTopLevelPosition(note);
@@ -532,10 +535,10 @@ export default class DesktopStickyNotesPlugin extends Plugin {
         delete this.settings.colorsByPath[oldPath];
         this.settings.colorsByPath[file.path] = color;
       }
-      const savedWindow = this.settings.savedWindowsByPath[oldPath];
-      if (savedWindow) {
+      const savedWindows = this.settings.savedWindowsByPath[oldPath];
+      if (savedWindows) {
         delete this.settings.savedWindowsByPath[oldPath];
-        this.settings.savedWindowsByPath[file.path] = savedWindow;
+        this.settings.savedWindowsByPath[file.path] = savedWindows;
       }
       void this.saveSettings();
     }));
@@ -857,9 +860,10 @@ export default class DesktopStickyNotesPlugin extends Plugin {
       this.rememberTopLevelPosition(note);
       // The saved list is deliberately not rebuilt here. A snapshot holds the
       // windows that are open at the time it is taken, so rebuilding while
-      // windows are closing would drop every sibling that closed first. A
-      // window closing for a reason outside the plugin keeps its saved entry;
-      // only hiding a note rebuilds the list.
+      // windows are closing would drop every sibling that closed first, and
+      // quitting Obsidian would save one window in place of all of them. A
+      // window that closed on its own therefore keeps its saved entry until the
+      // note is next recorded for some other reason.
       this.untrackNote(note);
     });
     return note;
@@ -1416,7 +1420,9 @@ export default class DesktopStickyNotesPlugin extends Plugin {
     const paths = new Set<string>();
     for (const note of [...this.pendingStateCaptures]) {
       // A note whose windows are still being reopened stays marked rather than
-      // producing a snapshot of the part of its list that exists so far.
+      // producing a snapshot of the part of its list that exists so far. The
+      // mark keeps until the next write, whether restoring records the note
+      // itself or a later event does.
       if (note.file.path === this.restoringPath) continue;
       this.pendingStateCaptures.delete(note);
       if (this.isTracked(note)) paths.add(note.file.path);
