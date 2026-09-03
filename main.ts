@@ -1392,8 +1392,8 @@ export default class DesktopStickyNotesPlugin extends Plugin {
   }
 
   // Window moves and resizes arrive continuously while a window is dragged, so
-  // the settings file is written once the movement has settled instead of on
-  // every event. The in-memory settings are already current at that point.
+  // a whole drag comes down to one snapshot and one write, both taken here once
+  // the movement has settled.
   private scheduleSettingsSave(): void {
     if (this.settingsSaveTimer !== null) window.clearTimeout(this.settingsSaveTimer);
     this.settingsSaveTimer = window.setTimeout(() => {
