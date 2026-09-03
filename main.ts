@@ -720,6 +720,7 @@ export default class DesktopStickyNotesPlugin extends Plugin {
       // One window per entry. A window that is already open claims the entry
       // whose name it carries, which is how a note the user opened by hand, or
       // one this loop has already been through, is not opened a second time.
+      this.releaseDestroyedWindows(path);
       const openIds = new Set([...(this.notesByPath.get(path) ?? [])].map((note) => note.id));
       const missing = [...this.settings.savedWindowsByPath[path]].filter((saved) => !openIds.has(saved.id));
       if (!missing.length) continue;
@@ -727,7 +728,7 @@ export default class DesktopStickyNotesPlugin extends Plugin {
       // handed out in order; that is the one place order still decides
       // anything, and any beyond the entries left over are closed.
       const reopened = this.adoptablePopoutLeaves(path, missing.length);
-      for (const [index, saved] of missing.entries()) {
+      for (const saved of missing) {
         // Rechecked for every window, not once for the note: opening one hands
         // control back, and in that time the note can have its file deleted or
         // renamed, or become the top-level note.
@@ -735,6 +736,11 @@ export default class DesktopStickyNotesPlugin extends Plugin {
         if (!this.noteIsStillRestorable(path, file)) break;
         // Hiding a window removes only its own entry, so the others still stand.
         if (!this.savedWindowExists(path, saved.id)) continue;
+        // The set this loop started from is stale between windows: a note
+        // opened by hand in the meantime takes over an entry nothing stood in
+        // for, which can be one this loop has not reached. Opening it again
+        // would leave two windows sharing a name and writing over each other.
+        if (this.windowExistsForId(path, saved.id)) continue;
         // Whether this window was saved collapsed does not depend on another
         // note's window manager having refused. Only the attempt does: a window
         // left expanded either way must not have its saved flag replaced with
@@ -749,7 +755,7 @@ export default class DesktopStickyNotesPlugin extends Plugin {
           const bounds = this.boundsOnCurrentDisplay(saved);
           // The windows open one at a time so that each exists, and has been
           // placed and collapsed, before the next takes the foreground.
-          const note = await this.reopenStickyNote(file, bounds, saved.id, reopened[index]);
+          const note = await this.reopenStickyNote(file, bounds, saved.id, reopened.shift());
           // Unloading refuses to open a window, which is not the note failing.
           if (this.unloaded) return;
           if (!note) {
@@ -783,6 +789,9 @@ export default class DesktopStickyNotesPlugin extends Plugin {
           this.restoringId = null;
         }
       }
+      // Popouts left over because the loop stopped early, or skipped the
+      // entries they were meant for, have nothing to be turned into.
+      for (const surplus of reopened) surplus.detach();
     }
     // A restore that fails for every note is otherwise indistinguishable from
     // the feature not running at all.
@@ -896,6 +905,13 @@ export default class DesktopStickyNotesPlugin extends Plugin {
 
   private savedWindowExists(path: string, id: string): boolean {
     return this.settings.savedWindowsByPath[path]?.some((saved) => saved.id === id) ?? false;
+  }
+
+  private windowExistsForId(path: string, id: string): boolean {
+    for (const note of this.notesByPath.get(path) ?? []) {
+      if (note.id === id) return true;
+    }
+    return false;
   }
 
   private noteIsStillRestorable(path: string, file: TFile): boolean {
@@ -1593,6 +1609,13 @@ export default class DesktopStickyNotesPlugin extends Plugin {
   private dismissNoteState(note: StickyNoteWindow): void {
     if (!this.settings.restoreNotesOnStartup) return;
     const path = note.file.path;
+    // Same exclusion as captureNoteState(): the top-level note is never in the
+    // list, so hiding one of its windows takes the whole entry rather than
+    // leaving the rest of a list that should not be there.
+    if (path === this.settings.topLevelNotePath) {
+      this.forgetNoteStates(path);
+      return;
+    }
     const windows = this.settings.savedWindowsByPath[path];
     if (!windows) return;
     const remaining = windows.filter((saved) => saved.id !== note.id);
