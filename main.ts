@@ -764,10 +764,11 @@ export default class DesktopStickyNotesPlugin extends Plugin {
       } finally {
         this.restoringPath = null;
       }
-      // Only a note whose every window came back in its saved state is
-      // re-recorded. Any other snapshot would replace the saved layout with
-      // what happened to work, so a note that fell short keeps the list it was
-      // restored from and tries again from it next time.
+      // Only a note whose every window was opened, survived being placed, and
+      // reached its saved collapsed state is re-recorded. Placement itself is
+      // not read back: wherever a window manager put the window is where the
+      // window is, and recording that is the point. A note that fell short
+      // keeps the list it was restored from and tries again from it next time.
       if (restored === missing.length) this.rememberNoteStates(path);
     }
     // A restore that fails for every note is otherwise indistinguishable from
@@ -840,8 +841,10 @@ export default class DesktopStickyNotesPlugin extends Plugin {
     const file = this.app.vault.getAbstractFileByPath(path);
     if (!(file instanceof TFile)) return;
     for (const leaf of this.plainPopoutLeavesForPath(path)) {
-      // A leaf whose native window cannot be found is left in place: detaching
-      // it would close a window the toggle can at least still replace.
+      // A leaf whose native window cannot be found is left in place. The toggle
+      // still cannot see it, so it opens a second window onto the note, which
+      // is the very thing this avoids elsewhere; closing a window the user left
+      // open is the worse of the two, so it stays.
       this.initializeStickyLeaf(file, leaf, false);
     }
   }
@@ -869,10 +872,9 @@ export default class DesktopStickyNotesPlugin extends Plugin {
     // keeps its relative place when the display it lands on is not the size it
     // was saved on. The size is left alone: a sticky note is sized for the
     // note it shows, not for the screen it happens to be on.
-    // Only the size of the saved work area is stored, so its origin is taken to
-    // be the one in front of us now. That holds for a single display and for
-    // displays whose arrangement did not change; rearranging monitors shifts
-    // the reference, and the clamp below is what keeps the window reachable.
+    // Only the size of the saved work area is stored, never its origin, so the
+    // origin in front of us now stands in for it. That holds while the displays
+    // are arranged as they were; rearranging them shifts the reference.
     const x = workArea.x + Math.round((saved.bounds.x - workArea.x) * (workArea.width / saved.workArea.width));
     const y = workArea.y + Math.round((saved.bounds.y - workArea.y) * (workArea.height / saved.workArea.height));
     // Whatever the conversion produced, the window has to end up somewhere the
@@ -1576,9 +1578,10 @@ export default class DesktopStickyNotesPlugin extends Plugin {
   }
 
   // Hiding a note is the one way its windows leave the saved list, so this is
-  // the only path allowed to shrink it. It also applies while the note is being
-  // restored: closing a window that restoring has just put on screen has to
-  // take effect rather than be undone by the rest of the loop.
+  // the only path allowed to shrink it, and it applies while the note is being
+  // restored too. Hiding the last window drops the note from the list, which
+  // also stops restoring from opening the rest of its windows; hiding one of
+  // several only shortens the list, and the loop goes on to the entries left.
   private dismissNoteStates(path: string): void {
     if (!this.settings.restoreNotesOnStartup) return;
     // Same exclusion as captureNoteStates(): dismissing a window of the
