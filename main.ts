@@ -864,7 +864,32 @@ export default class DesktopStickyNotesPlugin extends Plugin {
     }
   }
 
+  // Reading a window is a call into the main process, which throws once that
+  // window is gone rather than answering. Everything that walks the open
+  // windows has to survive one of them having died, so the question is asked
+  // here and nowhere else.
+  private windowIsGone(note: StickyNoteWindow): boolean {
+    try {
+      return note.window.isDestroyed();
+    } catch {
+      // An unusable proxy is as good as a destroyed window.
+      return true;
+    }
+  }
+
+  // A window can be destroyed without its document unloading, which leaves the
+  // note tracked. Nothing notices on its own, because a window that is gone
+  // sends no events, and while it is tracked it goes on standing in for the
+  // saved entry it claimed, so the note gains an entry every time it is opened
+  // again. Asked before anything counts which entries are claimed.
+  private releaseDestroyedWindows(path: string): void {
+    for (const note of [...(this.notesByPath.get(path) ?? [])]) {
+      if (this.windowIsGone(note)) this.untrackNote(note);
+    }
+  }
+
   private unclaimedWindowId(path: string): string | undefined {
+    this.releaseDestroyedWindows(path);
     const openIds = new Set([...(this.notesByPath.get(path) ?? [])].map((note) => note.id));
     return this.settings.savedWindowsByPath[path]?.find((saved) => !openIds.has(saved.id))?.id;
   }
@@ -1544,9 +1569,10 @@ export default class DesktopStickyNotesPlugin extends Plugin {
       delete this.settings.savedWindowsByPath[path];
       return;
     }
-    if (note.window.isDestroyed()) {
-      // Letting go of the window releases the listener it still holds in the
-      // main process. Its entry stays, so the window is reopened next time.
+    if (this.windowIsGone(note)) {
+      // Dropping the stale reference stops the note being carried along by
+      // everything that walks the open windows. Its entry stays, so the window
+      // is reopened next time.
       this.untrackNote(note);
       return;
     }
