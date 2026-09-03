@@ -191,7 +191,6 @@ interface NativeBrowserWindow {
   setParentWindow(parent: NativeBrowserWindow | null): void;
   setSkipTaskbar(skip: boolean): void;
   setOpacity(opacity: number): void;
-  getOpacity(): number;
   close(): void;
   destroy(): void;
   getPosition(): [number, number];
@@ -225,9 +224,6 @@ export default class DesktopStickyNotesPlugin extends Plugin {
     this.unregisterGlobalToggleShortcut();
     for (const note of [...this.allNotes()]) {
       this.rememberTopLevelPosition(note);
-      // The window is closed just below, so this matters only when that close
-      // does not go through: no window may outlive the plugin translucent with
-      // nothing left to restore it.
       this.restoreWindowOpacity(note);
       note.observer?.disconnect();
       note.leaf.detach();
@@ -772,6 +768,9 @@ export default class DesktopStickyNotesPlugin extends Plugin {
     note.appliedOpacity = opacity;
   }
 
+  // Called before a window is closed. The close normally makes this moot, but a
+  // window that survives it must not be left translucent with nothing tracking
+  // it any more.
   private restoreWindowOpacity(note: StickyNoteWindow): void {
     if (note.appliedOpacity === undefined || note.appliedOpacity === FULL_WINDOW_OPACITY) return;
     this.setNativeOpacity(note.window, FULL_WINDOW_OPACITY);
@@ -810,6 +809,7 @@ export default class DesktopStickyNotesPlugin extends Plugin {
     const notes = [...(this.notesByPath.get(path) ?? [])];
     for (const note of notes) {
       this.rememberTopLevelPosition(note);
+      this.restoreWindowOpacity(note);
       this.clearWindowMarker(note);
       this.untrackNote(note);
       note.leaf.detach();
@@ -825,6 +825,7 @@ export default class DesktopStickyNotesPlugin extends Plugin {
 
   private hideNote(note: StickyNoteWindow): void {
     this.rememberTopLevelPosition(note);
+    this.restoreWindowOpacity(note);
     this.clearWindowMarker(note);
     this.untrackNote(note);
     note.leaf.detach();
