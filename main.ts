@@ -204,6 +204,7 @@ export default class DesktopStickyNotesPlugin extends Plugin {
   private registeredGlobalShortcut: string | null = null;
   private shortcutRegistrationTimer: number | null = null;
   private opacitySaveTimer: number | null = null;
+  private saveQueue: Promise<void> = Promise.resolve();
   private toggleInProgress = false;
 
   async onload(): Promise<void> {
@@ -270,7 +271,14 @@ export default class DesktopStickyNotesPlugin extends Plugin {
   }
 
   async saveSettings(): Promise<void> {
-    await this.saveData(this.settings);
+    // Most callers start a save without awaiting it, and saveData() serializes
+    // the settings when it runs. Two overlapping writes can therefore finish in
+    // either order and leave data.json holding the older of the two states, so
+    // every write goes through one chain and reads the settings when its turn
+    // comes. A failed write does not stall the chain for the writes behind it.
+    const write = this.saveQueue.then(() => this.saveData(this.settings));
+    this.saveQueue = write.catch(() => undefined);
+    await write;
   }
 
   scheduleGlobalShortcutRegistration(): void {
