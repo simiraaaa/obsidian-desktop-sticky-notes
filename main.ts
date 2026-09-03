@@ -1319,7 +1319,7 @@ export default class DesktopStickyNotesPlugin extends Plugin {
     }
     // Every window for this note has been dismissed, so the list is rebuilt
     // from what is left, which is nothing.
-    this.rememberNoteStates(path);
+    this.dismissNoteStates(path);
     void this.app.workspace.requestSaveLayout();
   }
 
@@ -1330,7 +1330,7 @@ export default class DesktopStickyNotesPlugin extends Plugin {
     // Hiding is the one dismissal that shrinks the list: it is rebuilt from the
     // windows that are still open, and the note leaves the list entirely once
     // the last of them is hidden.
-    this.rememberNoteStates(note.file.path);
+    this.dismissNoteStates(note.file.path);
     note.leaf.detach();
     this.forceCloseWindow(note.window);
     void this.app.workspace.requestSaveLayout();
@@ -1436,7 +1436,7 @@ export default class DesktopStickyNotesPlugin extends Plugin {
   private captureNoteStates(path: string): void {
     if (!this.settings.restoreNotesOnStartup) return;
     // Held back while this note's own windows are being reopened: its list is
-    // only partly on screen, and a snapshot would replace the list with that.
+    // only partly on screen, and restoring records the note once it is whole.
     if (path === this.restoringPath) return;
     // The top-level note is shown and hidden by its own toggle and keeps its
     // own saved position, so it is never part of the restore list. An entry
@@ -1445,6 +1445,20 @@ export default class DesktopStickyNotesPlugin extends Plugin {
       delete this.settings.savedWindowsByPath[path];
       return;
     }
+    const windows = this.noteWindowStates(path);
+    // A snapshot may grow the list but never shrink it. Windows disappear for
+    // reasons the plugin never observes as such, and by the time it looks they
+    // are simply not there: Obsidian quitting, the window manager, a restore
+    // that stopped halfway. Those are exactly the windows this feature exists
+    // to bring back, and a dropped one cannot be recovered, while a stale one
+    // costs a single hide. Hiding a note is the one way a window leaves.
+    if (!windows || windows.length < (this.settings.savedWindowsByPath[path]?.length ?? 0)) return;
+    this.settings.savedWindowsByPath[path] = windows;
+  }
+
+  // Null when a window could not be read. Its state is then unknown rather than
+  // absent, and treating it as absent would drop a window that is on screen.
+  private noteWindowStates(path: string): SavedNoteWindow[] | null {
     const notes = this.notesByPath.get(path) ?? new Set<StickyNoteWindow>();
     const previous = this.settings.savedWindowsByPath[path];
     // Windows carry no identity, so a saved entry can only be matched to a live
@@ -1454,13 +1468,27 @@ export default class DesktopStickyNotesPlugin extends Plugin {
     const windows: SavedNoteWindow[] = [];
     for (const note of notes) {
       const state = this.noteWindowState(note, matching?.[windows.length]);
-      if (state) windows.push(state);
+      if (!state) return null;
+      windows.push(state);
     }
-    if (windows.length) {
-      this.settings.savedWindowsByPath[path] = windows;
-    } else {
-      delete this.settings.savedWindowsByPath[path];
+    return windows;
+  }
+
+  // Hiding a note is the one way its windows leave the saved list, so this is
+  // the only path allowed to shrink it. It also applies while the note is being
+  // restored: closing a window that restoring has just put on screen has to
+  // take effect rather than be undone by the rest of the loop.
+  private dismissNoteStates(path: string): void {
+    if (!this.settings.restoreNotesOnStartup) return;
+    if (!this.notesByPath.has(path)) {
+      this.forgetNoteStates(path);
+      return;
     }
+    const windows = this.noteWindowStates(path);
+    // An unreadable window leaves the count stale rather than dropping windows
+    // that are still on screen; hiding one of those settles it.
+    if (windows) this.settings.savedWindowsByPath[path] = windows;
+    this.scheduleSettingsSave();
   }
 
   private noteWindowState(note: StickyNoteWindow, previous: SavedNoteWindow | undefined): SavedNoteWindow | null {
