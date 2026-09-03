@@ -202,6 +202,7 @@ export default class DesktopStickyNotesPlugin extends Plugin {
   private initializedLeaves = new WeakSet<WorkspaceLeaf>();
   private registeredGlobalShortcut: string | null = null;
   private shortcutRegistrationTimer: number | null = null;
+  private unloaded = false;
   private opacitySaveTimer: number | null = null;
   private saveQueue: Promise<void> = Promise.resolve();
   private toggleInProgress = false;
@@ -219,6 +220,7 @@ export default class DesktopStickyNotesPlugin extends Plugin {
   }
 
   onunload(): void {
+    this.unloaded = true;
     if (this.shortcutRegistrationTimer !== null) window.clearTimeout(this.shortcutRegistrationTimer);
     this.flushWindowOpacitySave();
     this.unregisterGlobalToggleShortcut();
@@ -568,7 +570,10 @@ export default class DesktopStickyNotesPlugin extends Plugin {
   }
 
   private prepareWindow(note: StickyNoteWindow): void {
-    if (note.window.isDestroyed()) return;
+    // scheduleRefreshNote() uses plain timeouts, which outlive the plugin. A
+    // pass that runs after unload would decorate a window the plugin no longer
+    // owns and undo the opacity that unload has just restored.
+    if (this.unloaded || note.window.isDestroyed()) return;
     const { document, window } = note;
     const nativeTitle = this.nativeNoteWindowTitle(note.file);
     const domWindow = document.defaultView;
