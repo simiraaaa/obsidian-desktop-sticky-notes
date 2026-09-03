@@ -999,10 +999,11 @@ export default class DesktopStickyNotesPlugin extends Plugin {
 
   private initializeStickyLeaf(file: TFile, leaf: WorkspaceLeaf, options: { detachOnFailure?: boolean; id?: string } = {}): StickyNoteWindow | null {
     // A window opened without a name of its own takes over an entry that no
-    // window is standing in for. Otherwise closing a note with the window
-    // frame's own button, which by design keeps its entry, and opening it again
-    // would leave a new entry beside the old one every time, and every one of
-    // them would be reopened at the next start.
+    // window is standing in for. Entries outlive their windows whenever the
+    // closing was not the user's doing: a window destroyed without its document
+    // unloading, or one closed while Obsidian was going down. Opening the note
+    // again would otherwise leave a new entry beside each of those, and every
+    // one of them would be reopened at the next start.
     const { detachOnFailure = true, id = this.unclaimedWindowId(file.path) ?? crypto.randomUUID() } = options;
     if (this.initializedLeaves.has(leaf)) return null;
 
@@ -1659,11 +1660,14 @@ export default class DesktopStickyNotesPlugin extends Plugin {
     for (const note of dismissed) this.dismissNoteState(note);
   }
 
+  // Takes one window out of the saved list, which is what the user closing it
+  // means, whether through the hide button or the window frame. A window that
+  // goes away for any other reason keeps its entry and comes back.
   private dismissNoteState(note: StickyNoteWindow): void {
     if (!this.settings.restoreNotesOnStartup) return;
     const path = note.file.path;
     // Same exclusion as captureNoteState(): the top-level note is never in the
-    // list, so hiding one of its windows takes the whole entry rather than
+    // list, so dismissing one of its windows takes the whole entry rather than
     // leaving the rest of a list that should not be there.
     if (path === this.settings.topLevelNotePath) {
       this.forgetNoteStates(path);
