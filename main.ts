@@ -1394,6 +1394,10 @@ export default class DesktopStickyNotesPlugin extends Plugin {
   }
 
   private capturePendingNoteStates(): void {
+    // Marks are held rather than dropped while notes are being reopened: the
+    // snapshot they would produce is suppressed, and restoring re-arms the
+    // timer for them as it records each note it finishes.
+    if (this.restoringNotes) return;
     // Marked notes are resolved to paths first: a note is saved together with
     // every other window on the same file, and dragging one window must not
     // snapshot that file once per window.
