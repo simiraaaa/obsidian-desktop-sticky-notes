@@ -313,8 +313,8 @@ export default class DesktopStickyNotesPlugin extends Plugin {
     this.registerGlobalToggleShortcut();
     this.registerEvent(this.app.workspace.on("active-leaf-change", () => this.scheduleRefreshAllNotes()));
     this.registerEvent(this.app.workspace.on("layout-change", () => this.scheduleRefreshAllNotes()));
-    // Runs after closeStaleStickyWindows() has removed the popouts Obsidian
-    // restored on its own, so the notes reopened here are the only ones left.
+    // Waits for the layout because Obsidian deserializes its own popouts as
+    // part of it, and a note it reopened by itself must not be opened twice.
     this.app.workspace.onLayoutReady(() => void this.restoreSavedNotes());
   }
 
@@ -660,26 +660,31 @@ export default class DesktopStickyNotesPlugin extends Plugin {
 
   private async restoreSavedNotes(): Promise<void> {
     if (!this.settings.restoreNotesOnStartup) return;
-    // Obsidian deserializes its own popouts as part of the layout, which is
-    // only complete now: the same cleanup in onload() runs before that and can
-    // miss them. Reopening a note that is already on screen would show it
-    // twice, so the cleanup is repeated here rather than assumed to have run.
-    this.closeStaleStickyWindows();
     let failures = 0;
+    let collapsingUnsupported = false;
     for (const [path, saved] of Object.entries(this.settings.savedWindowsByPath)) {
       // Restoring hands control back between notes, so an entry that was hidden
       // in the meantime must not be reopened from the list this started with.
       if (!(path in this.settings.savedWindowsByPath)) continue;
+      // The top-level note has its own toggle and its own saved position. It
+      // is kept out of the list when it is written, so an entry here means the
+      // two settings went out of step, not that the note should be reopened.
+      if (path === this.settings.topLevelNotePath) continue;
       const file = this.app.vault.getAbstractFileByPath(path);
       // An entry whose file is missing right now is kept rather than dropped:
       // the same vault can be opened where that file has not been synced yet.
-      if (!(file instanceof TFile) || this.notesByPath.has(path)) continue;
+      if (!(file instanceof TFile) || this.noteWindowExistsForPath(path)) continue;
+      const collapse = saved.isCollapsed && this.settings.enableCollapsibleNotes && !collapsingUnsupported;
       try {
         const bounds = this.boundsOnCurrentDisplay(saved);
         // The notes open one at a time so that each window exists, and has been
         // placed and collapsed, before the next one takes over the foreground.
         const note = await this.openStickyNote(file, bounds);
-        if (note) await this.applySavedWindow(note, saved, bounds);
+        if (!note) continue;
+        await this.applySavedWindow(note, saved, bounds, collapse);
+        // Collapsing is refused by whole window managers rather than by single
+        // windows, and every refusal warns the user. One warning is enough.
+        if (collapse && !note.isCollapsed) collapsingUnsupported = true;
       } catch {
         failures++;
       }
@@ -689,13 +694,13 @@ export default class DesktopStickyNotesPlugin extends Plugin {
     if (failures) new Notice(`Could not restore ${failures} sticky note${failures === 1 ? "" : "s"}.`);
   }
 
-  private async applySavedWindow(note: StickyNoteWindow, saved: SavedNoteWindow, bounds: WindowBounds): Promise<void> {
+  private async applySavedWindow(note: StickyNoteWindow, saved: SavedNoteWindow, bounds: WindowBounds, collapse: boolean): Promise<void> {
     if (note.window.isDestroyed()) return;
     // openPopoutLeaf() was given the same rectangle, but it sizes the web
     // contents, so the window frame is only accounted for here.
     note.window.setBounds(bounds);
     if (saved.isPinned) this.setNotePinned(note, true);
-    if (saved.isCollapsed && this.settings.enableCollapsibleNotes) await this.collapseRestoredNote(note);
+    if (collapse) await this.collapseRestoredNote(note);
     this.rememberNoteState(note);
     // The controls were built before the window was pinned or collapsed, so
     // they are refreshed to show the state that has just been applied.
@@ -715,6 +720,23 @@ export default class DesktopStickyNotesPlugin extends Plugin {
       }
       await sleep(HEADER_MEASURE_INTERVAL_MS);
     }
+  }
+
+  private noteWindowExistsForPath(path: string): boolean {
+    if (this.notesByPath.has(path)) return true;
+    // Obsidian can reopen a popout for this note from its own saved layout.
+    // Such a leaf carries none of the markers this plugin writes, so it is
+    // recognised by living in a document other than the main window's. Opening
+    // a second window for the same note cannot be undone except by hiding the
+    // windows one at a time, so the note is left to the window it already has.
+    const mainDocument = this.app.workspace.containerEl.ownerDocument;
+    let exists = false;
+    this.app.workspace.iterateAllLeaves((leaf) => {
+      const { view } = leaf;
+      if (!(view instanceof MarkdownView) || view.file?.path !== path) return;
+      if (view.containerEl.ownerDocument !== mainDocument) exists = true;
+    });
+    return exists;
   }
 
   private boundsOnCurrentDisplay(saved: SavedNoteWindow): WindowBounds {
