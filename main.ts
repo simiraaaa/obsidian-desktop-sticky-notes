@@ -164,6 +164,7 @@ interface StickyNoteSettings {
   defaultFolder: string;
   defaultNoteColor: string;
   windowOpacity: number;
+  opaqueWhileFocused: boolean;
 
   headerSize: HeaderSize;
 
@@ -295,6 +296,7 @@ function createDefaultSettings(): StickyNoteSettings {
     defaultFolder: "",
     defaultNoteColor: DEFAULT_COLOR,
     windowOpacity: FULL_WINDOW_OPACITY,
+    opaqueWhileFocused: true,
 
     headerSize: "default",
 
@@ -485,6 +487,9 @@ export default class DesktopStickyNotesPlugin extends Plugin {
       windowOpacity: isWindowOpacity(stored.windowOpacity)
         ? normalizeWindowOpacity(stored.windowOpacity)
         : defaults.windowOpacity,
+      opaqueWhileFocused: typeof stored.opaqueWhileFocused === "boolean"
+        ? stored.opaqueWhileFocused
+        : defaults.opaqueWhileFocused,
 
       headerSize: isHeaderSize(stored.headerSize) ? stored.headerSize : defaults.headerSize,
 
@@ -1628,6 +1633,13 @@ export default class DesktopStickyNotesPlugin extends Plugin {
     this.scheduleWindowOpacitySave();
   }
 
+  async setOpaqueWhileFocused(enabled: boolean): Promise<void> {
+    if (enabled === this.settings.opaqueWhileFocused) return;
+    this.settings.opaqueWhileFocused = enabled;
+    for (const note of this.allNotes()) this.applyWindowOpacity(note);
+    await this.saveSettings();
+  }
+
   private scheduleWindowOpacitySave(): void {
     // Obsidian releases before 1.5.9 report a slider value per drag step, and
     // key repeat does so in every release. Overlapping saveData() calls have no
@@ -1646,8 +1658,10 @@ export default class DesktopStickyNotesPlugin extends Plugin {
     void this.saveSettings();
   }
 
+  // The focus and blur passes call this, so a window that has the focus is
+  // brought to full opacity and back as the focus moves.
   private applyWindowOpacity(note: StickyNoteWindow): void {
-    const opacity = this.settings.windowOpacity;
+    const opacity = this.targetWindowOpacity(note);
     if (note.appliedOpacity === opacity) return;
     // A window opens fully opaque, so the default setting needs no native call
     // here. Returning to full opacity from a lower value still does, which is
@@ -1669,6 +1683,21 @@ export default class DesktopStickyNotesPlugin extends Plugin {
     if (note.appliedOpacity === undefined || note.appliedOpacity === FULL_WINDOW_OPACITY) return;
     this.setNativeOpacity(note.window, FULL_WINDOW_OPACITY);
     note.appliedOpacity = FULL_WINDOW_OPACITY;
+  }
+
+  private targetWindowOpacity(note: StickyNoteWindow): number {
+    const { windowOpacity, opaqueWhileFocused } = this.settings;
+    if (!opaqueWhileFocused || windowOpacity === FULL_WINDOW_OPACITY) return windowOpacity;
+    return this.isNativeWindowFocused(note.window) ? FULL_WINDOW_OPACITY : windowOpacity;
+  }
+
+  private isNativeWindowFocused(nativeWindow: NativeBrowserWindow): boolean {
+    try {
+      return !nativeWindow.isDestroyed() && nativeWindow.isFocused();
+    } catch {
+      // The remote proxy becomes invalid as soon as the window closes.
+      return false;
+    }
   }
 
   private setNativeOpacity(nativeWindow: NativeBrowserWindow, opacity: number): void {
@@ -2042,6 +2071,11 @@ class DesktopStickyNotesSettingTab extends PluginSettingTab {
         render: (setting) => this.addWindowOpacityControl(setting)
       },
       {
+        name: "Opaque while focused",
+        desc: "Keep a sticky note fully opaque while its window has the focus, so that it stays easy to read while you work in it. Applies only when window opacity is below 100%.",
+        render: (setting) => this.addOpaqueWhileFocusedControl(setting)
+      },
+      {
         name: "Header size",
         desc: "Height of the sticky-note header. Small and extra small also hide the window buttons on macOS when the window frame style is hidden.",
         render: (setting) => this.addHeaderSizeControl(setting)
@@ -2082,6 +2116,9 @@ class DesktopStickyNotesSettingTab extends PluginSettingTab {
     this.addWindowOpacityControl(new Setting(containerEl)
       .setName("Window opacity")
       .setDesc("Opacity of every sticky-note window. Fully opaque by default."));
+    this.addOpaqueWhileFocusedControl(new Setting(containerEl)
+      .setName("Opaque while focused")
+      .setDesc("Keep a sticky note fully opaque while its window has the focus, so that it stays easy to read while you work in it. Applies only when window opacity is below 100%."));
 
     this.addHeaderSizeControl(new Setting(containerEl)
       .setName("Header size")
@@ -2130,6 +2167,12 @@ class DesktopStickyNotesSettingTab extends PluginSettingTab {
       .setLimits(MIN_WINDOW_OPACITY, FULL_WINDOW_OPACITY, WINDOW_OPACITY_STEP)
       .setValue(this.plugin.settings.windowOpacity)
       .onChange((value) => this.plugin.setWindowOpacity(value)));
+  }
+
+  private addOpaqueWhileFocusedControl(setting: Setting): void {
+    setting.addToggle((toggle) => toggle
+      .setValue(this.plugin.settings.opaqueWhileFocused)
+      .onChange((value) => void this.plugin.setOpaqueWhileFocused(value)));
   }
 
   private addHeaderSizeControl(setting: Setting): void {
