@@ -1001,9 +1001,10 @@ export default class DesktopStickyNotesPlugin extends Plugin {
     // A window opened without a name of its own takes over an entry that no
     // window is standing in for. Entries outlive their windows whenever the
     // closing was not the user's doing: a window destroyed without its document
-    // unloading, or one closed while Obsidian was going down. Opening the note
-    // again would otherwise leave a new entry beside each of those, and every
-    // one of them would be reopened at the next start.
+    // unloading, one closed while Obsidian was going down, and one whose
+    // dismissal is still waiting to be applied. Opening the note again would
+    // otherwise leave a new entry beside each of those, and every one of them
+    // would be reopened at the next start.
     const { detachOnFailure = true, id = this.unclaimedWindowId(file.path) ?? crypto.randomUUID() } = options;
     if (this.initializedLeaves.has(leaf)) return null;
 
@@ -1666,6 +1667,11 @@ export default class DesktopStickyNotesPlugin extends Plugin {
   private dismissNoteState(note: StickyNoteWindow): void {
     if (!this.settings.restoreNotesOnStartup) return;
     const path = note.file.path;
+    // A dismissal can be queued for a window that is already gone while its
+    // entry is handed to a window opened since. Taking the entry then would
+    // take the new window's record with it, so an entry a live window stands
+    // in for is left alone; that window's own closing will come back here.
+    if (this.windowExistsForId(path, note.id)) return;
     // Same exclusion as captureNoteState(): the top-level note is never in the
     // list, so dismissing one of its windows takes the whole entry rather than
     // leaving the rest of a list that should not be there.
