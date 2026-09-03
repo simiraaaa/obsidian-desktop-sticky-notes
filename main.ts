@@ -612,7 +612,14 @@ export default class DesktopStickyNotesPlugin extends Plugin {
     const view = note.leaf.view;
     if (!(view instanceof MarkdownView)) return;
     const actions = view.containerEl.querySelector(".view-actions");
-    actions?.empty();
+    if (!actions) return;
+    // prepareWindow() also runs when a click focuses an inactive note, that is
+    // between the mousedown and the mouseup of that click. Rebuilding the
+    // buttons then replaces the pressed button, so no click event fires and the
+    // first click on an inactive note is lost. Buttons that are still present
+    // are updated in place instead, and the bar is only rebuilt without them.
+    if (this.updateStickyActions(note, actions)) return;
+    actions.empty();
 
     const pin = view.addAction("pin", "Keep on top", () => {
       const pinned = !note.window.isAlwaysOnTop();
@@ -625,9 +632,10 @@ export default class DesktopStickyNotesPlugin extends Plugin {
       if (pinned) note.window.moveTop();
       this.updatePinButton(pin, note.window.isAlwaysOnTop());
     });
+    pin.addClass("desktop-sticky-note-pin");
     this.updatePinButton(pin, note.window.isAlwaysOnTop());
 
-    const colorPicker = actions?.createEl("input", {
+    const colorPicker = actions.createEl("input", {
       cls: "desktop-sticky-note-color-picker",
       attr: {
         type: "color",
@@ -645,9 +653,29 @@ export default class DesktopStickyNotesPlugin extends Plugin {
       void view.setState({ mode: nextMode }, { history: false });
       this.updateModeButton(mode, nextMode);
     });
+    mode.addClass("desktop-sticky-note-mode");
     this.updateModeButton(mode, view.getMode());
     view.addAction("x", "Hide sticky note", () => this.hideNote(note))
       .addClass("desktop-sticky-note-hide");
+  }
+
+  private updateStickyActions(note: StickyNoteWindow, actions: Element): boolean {
+    const view = note.leaf.view;
+    if (!(view instanceof MarkdownView)) return false;
+    const pin = actions.querySelector<HTMLElement>(".desktop-sticky-note-pin");
+    const colorPicker = actions.querySelector<HTMLInputElement>(".desktop-sticky-note-color-picker");
+    const mode = actions.querySelector<HTMLElement>(".desktop-sticky-note-mode");
+    const hide = actions.querySelector<HTMLElement>(".desktop-sticky-note-hide");
+    if (!pin || !colorPicker || !mode || !hide) return false;
+    // The bar holds only the sticky-note controls, exactly as after a rebuild.
+    const stickyActions: Element[] = [pin, colorPicker, mode, hide];
+    for (const child of Array.from(actions.children)) {
+      if (!stickyActions.includes(child)) child.remove();
+    }
+    this.updatePinButton(pin, note.window.isAlwaysOnTop());
+    colorPicker.value = this.noteColor(note.file.path);
+    this.updateModeButton(mode, view.getMode());
+    return true;
   }
 
   private updatePinButton(button: HTMLElement, pinned: boolean): void {
