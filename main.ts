@@ -153,6 +153,7 @@ interface StickyActions {
   colorPicker: HTMLInputElement;
   mode: HTMLElement;
   hide: HTMLElement;
+  collapse?: HTMLElement;
 }
 
 interface StickyNoteWindow {
@@ -678,8 +679,7 @@ export default class DesktopStickyNotesPlugin extends Plugin {
         this.updateCollapseButton(collapse, note.isCollapsed);
       });
       collapse.addClass("desktop-sticky-note-collapse");
-      // Actions are rebuilt from scratch on every refresh, so the icon comes
-      // from the tracked state rather than from the button being replaced.
+      // A rebuilt bar starts from the tracked state, like the in-place update.
       this.updateCollapseButton(collapse, note.isCollapsed);
     }
 
@@ -859,6 +859,9 @@ export default class DesktopStickyNotesPlugin extends Plugin {
   }
 
   private updateCollapseButton(button: HTMLElement, collapsed: boolean): void {
+    // Same no-op guard as the other buttons: see updatePinButton().
+    if (button.dataset.desktopStickyNoteCollapsed === String(collapsed)) return;
+    button.dataset.desktopStickyNoteCollapsed = String(collapsed);
     setIcon(button, collapsed ? "chevron-right" : "chevron-down");
     setTooltip(button, collapsed ? "Expand sticky note" : "Collapse sticky note");
     button.setAttribute("aria-expanded", String(!collapsed));
@@ -874,15 +877,21 @@ export default class DesktopStickyNotesPlugin extends Plugin {
     const mode = actions.querySelector<HTMLElement>(".desktop-sticky-note-mode");
     const hide = actions.querySelector<HTMLElement>(".desktop-sticky-note-hide");
     if (!pin || !colorPicker || !mode || !hide) return null;
-    return { pin, colorPicker, mode, hide };
+    // The collapse button follows its setting, so a bar built under the other
+    // value is incomplete and gets rebuilt rather than patched.
+    const collapse = actions.querySelector<HTMLElement>(".desktop-sticky-note-collapse") ?? undefined;
+    if (this.settings.enableCollapsibleNotes !== !!collapse) return null;
+    return { pin, colorPicker, mode, hide, collapse };
   }
 
   private updateStickyActions(note: StickyNoteWindow, view: MarkdownView, actions: Element, buttons: StickyActions): void {
     // The bar holds only the sticky-note controls, exactly as after a rebuild.
     const stickyActions: Element[] = [buttons.pin, buttons.colorPicker, buttons.mode, buttons.hide];
+    if (buttons.collapse) stickyActions.push(buttons.collapse);
     for (const child of Array.from(actions.children)) {
       if (!stickyActions.includes(child)) child.remove();
     }
+    if (buttons.collapse) this.updateCollapseButton(buttons.collapse, note.isCollapsed);
     this.updatePinButton(buttons.pin, note.window.isAlwaysOnTop());
     buttons.colorPicker.value = this.noteColor(note.file.path);
     this.updateModeButton(buttons.mode, view.getMode());
