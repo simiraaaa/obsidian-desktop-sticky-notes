@@ -11,14 +11,11 @@ const FULL_WINDOW_OPACITY = 1;
 const WINDOW_OPACITY_STEP = 0.05;
 const LEGACY_DEFAULT_GLOBAL_SHORTCUT = "CommandOrControl+Alt+N";
 const SETTINGS_SAVE_DEBOUNCE_MS = 500;
-// Obsidian says it is going down a few milliseconds before the sticky windows
-// begin to close, so the news is only current for a moment. This is far longer
-// than that, which absorbs a signal that arrives late or a row of windows
-// closing one after another, and short enough that a window the user closes
-// after cancelling a quit is not counted as part of it. Erring long is the safe
-// direction: keeping a window the user meant to be rid of costs one hide, while
-// dropping one they meant to keep cannot be undone.
-const SHUTDOWN_SIGNAL_WINDOW_MS = 2000;
+// How far ahead of a shutdown signal a window has to have closed for that
+// closing to be the user's own. The two arrive within a few milliseconds of
+// each other when Obsidian is quitting, so anything queued this long before the
+// signal was not part of it; the measured gap is three milliseconds.
+const SHUTDOWN_RACE_SLACK_MS = 250;
 const HEADER_MEASURE_ATTEMPTS = 20;
 const HEADER_MEASURE_INTERVAL_MS = 50;
 
@@ -389,16 +386,33 @@ export default class DesktopStickyNotesPlugin extends Plugin {
   private settingsSaveTimer: number | null = null;
   private pendingStateCaptures = new Set<StickyNoteWindow>();
   private restoringId: string | null = null;
-  private shutdownSignalledAt = 0;
-  private pendingDismissals = new Set<StickyNoteWindow>();
-  private readonly markShuttingDown = () => { this.shutdownSignalledAt = Date.now(); };
+  private shutdownLatched = false;
+  // Monotonic, so that a clock the system adjusts underneath cannot turn an
+  // elapsed time negative or enormous. Null until Obsidian says anything.
+  private shutdownSignalledAt: number | null = null;
+  private unloadedAt: number | null = null;
+  private pendingDismissals = new Map<StickyNoteWindow, number>();
+  // Latched rather than timed out: a quit can be held open for as long as
+  // another plugin's shutdown tasks take, and a window closing at the end of
+  // that is still part of the quit. What lowers it again is evidence that the
+  // quit did not happen, below.
+  private readonly markShuttingDown = () => {
+    this.shutdownLatched = true;
+    this.shutdownSignalledAt = performance.now();
+  };
+  // Obsidian only stays interactive if it is not going anywhere, so a click or
+  // a keypress after the signal says the quit was called off. Closing a window
+  // through its frame without touching anything else first is then read as part
+  // of the quit and keeps its entry, which one hide undoes; the reverse, losing
+  // every window because a quit was misread, cannot be undone.
+  private readonly releaseShutdownLatch = () => { this.shutdownLatched = false; };
   private toggleInProgress = false;
 
   // Whether Obsidian is on its way out, so that a sticky window closing now is
   // not the user being rid of it. Unloading is the end of that road rather than
   // a state beside it, so it counts as well.
   private get shuttingDown(): boolean {
-    return this.unloaded || Date.now() - this.shutdownSignalledAt < SHUTDOWN_SIGNAL_WINDOW_MS;
+    return this.unloaded || this.shutdownLatched;
   }
 
   async onload(): Promise<void> {
@@ -425,8 +439,11 @@ export default class DesktopStickyNotesPlugin extends Plugin {
     this.registerDomEvent(window, "beforeunload", this.markShuttingDown);
     // Obsidian's own quit event crosses no process boundary, so it does not
     // depend on the main process's before-quit winning its race with the
-    // windows it is announcing the closure of.
+    // windows it is announcing the closure of. Its API says it is not
+    // guaranteed to run, so it stands beside the other two rather than
+    // replacing them.
     this.registerEvent(this.app.workspace.on("quit", this.markShuttingDown));
+    this.watchForCancelledShutdown(window);
   }
 
   onunload(): void {
@@ -435,6 +452,7 @@ export default class DesktopStickyNotesPlugin extends Plugin {
     // Restoring runs across awaits and outlives this call. It stops at its next
     // step, and until then it must not suppress the capture below.
     this.unloaded = true;
+    this.unloadedAt = performance.now();
     try {
       electronApp.removeListener("before-quit", this.markShuttingDown);
     } catch {
@@ -1103,9 +1121,10 @@ export default class DesktopStickyNotesPlugin extends Plugin {
     // A window opened without a name of its own takes over an entry that no
     // window is standing in for. Entries outlive their windows whenever the
     // closing was not the user's doing: a window destroyed without its document
-    // unloading, or one closed while Obsidian was going down. Opening the note
-    // again would otherwise leave a new entry beside each of those, and every
-    // one of them would be reopened at the next start.
+    // unloading, one closed while Obsidian was going down, and one whose
+    // dismissal is still waiting to be applied. Opening the note again would
+    // otherwise leave a new entry beside each of those, and every one of them
+    // would be reopened at the next start.
     const { detachOnFailure = true, id = this.unclaimedWindowId(file.path) ?? crypto.randomUUID() } = options;
     if (this.initializedLeaves.has(leaf)) return null;
 
@@ -1241,6 +1260,17 @@ export default class DesktopStickyNotesPlugin extends Plugin {
     const restore = () => this.scheduleRefreshNote(note);
     this.registerDomEvent(domWindow, "focus", restore);
     this.registerDomEvent(domWindow, "blur", restore);
+    this.watchForCancelledShutdown(domWindow);
+  }
+
+  private watchForCancelledShutdown(domWindow: Window): void {
+    this.registerDomEvent(domWindow, "pointerdown", this.releaseShutdownLatch);
+    // A chord with the command key is a command, not the user working on, and
+    // the quit shortcut itself is one of them: its keydown may reach the
+    // renderer after the signal it caused.
+    this.registerDomEvent(domWindow, "keydown", (event) => {
+      if (!event.metaKey && !event.ctrlKey) this.releaseShutdownLatch();
+    });
   }
 
   private watchWindowGeometry(note: StickyNoteWindow): void {
@@ -1752,6 +1782,7 @@ export default class DesktopStickyNotesPlugin extends Plugin {
     this.clearWindowMarker(note);
     this.untrackNote(note);
     this.dismissNoteState(note);
+    this.scheduleSettingsSave();
     note.leaf.detach();
     this.forceCloseWindow(note.window);
     void this.app.workspace.requestSaveLayout();
@@ -1878,23 +1909,27 @@ export default class DesktopStickyNotesPlugin extends Plugin {
     this.settings.savedWindowsByPath[path] = windows;
   }
 
-  // Hiding a window is the one way it leaves the saved list, and it takes only
-  // its own entry with it. The note is dropped once its last entry goes.
   // A window closing through its frame and Obsidian quitting are milliseconds
   // apart, and only their order tells them apart. Rather than settle that on
   // the spot, the dismissal waits for the write that is debounced anyway: by
   // then a quit has had far longer than those milliseconds to announce itself,
   // and a dismissal caught by one is dropped.
   private scheduleNoteDismissal(note: StickyNoteWindow): void {
-    this.pendingDismissals.add(note);
+    this.pendingDismissals.set(note, performance.now());
     this.scheduleSettingsSave();
   }
 
   private applyPendingDismissals(): void {
     const dismissed = [...this.pendingDismissals];
     this.pendingDismissals.clear();
-    if (this.shuttingDown) return;
-    for (const note of dismissed) this.dismissNoteState(note);
+    // Only the closings that could be part of the shutdown are dropped. A
+    // window closed well before Obsidian said anything was closed by the user,
+    // however little of the debounce was left when the shutdown arrived.
+    const signalledAt = this.shuttingDown ? this.shutdownSignalledAt ?? this.unloadedAt : null;
+    for (const [note, queuedAt] of dismissed) {
+      if (signalledAt !== null && queuedAt >= signalledAt - SHUTDOWN_RACE_SLACK_MS) continue;
+      this.dismissNoteState(note);
+    }
   }
 
   // Takes one window out of the saved list, which is what the user closing it
@@ -1903,6 +1938,11 @@ export default class DesktopStickyNotesPlugin extends Plugin {
   private dismissNoteState(note: StickyNoteWindow): void {
     if (!this.settings.restoreNotesOnStartup) return;
     const path = note.file.path;
+    // A dismissal can be queued for a window that is already gone while its
+    // entry is handed to a window opened since. Taking the entry then would
+    // take the new window's record with it, so an entry a live window stands
+    // in for is left alone; that window's own closing will come back here.
+    if (this.windowExistsForId(path, note.id)) return;
     // Same exclusion as captureNoteState(): the top-level note is never in the
     // list, so dismissing one of its windows takes the whole entry rather than
     // leaving the rest of a list that should not be there.
@@ -1918,7 +1958,6 @@ export default class DesktopStickyNotesPlugin extends Plugin {
     } else {
       delete this.settings.savedWindowsByPath[path];
     }
-    this.scheduleSettingsSave();
   }
 
   private noteWindowState(note: StickyNoteWindow, previous: SavedNoteWindow | undefined): SavedNoteWindow | null {
@@ -1993,9 +2032,9 @@ export default class DesktopStickyNotesPlugin extends Plugin {
       this.settingsSaveTimer = null;
     }
     this.capturePendingNoteStates();
-    // Unloading is the answer the deferred dismissals were waiting for: the
-    // windows were closing because Obsidian was, so they keep their entries.
-    this.pendingDismissals.clear();
+    // Unloading answers the deferred dismissals, but not all of them the same
+    // way: a window closed long enough before it was closed by the user.
+    this.applyPendingDismissals();
     // saveData() is asynchronous and onunload() cannot await it, so a change
     // made moments before Obsidian quits may not reach disk.
     void this.saveSettings();
