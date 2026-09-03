@@ -327,8 +327,9 @@ interface StickyNoteWindow {
   document: Document;
   window: NativeBrowserWindow;
   observer?: MutationObserver;
-  // Opacity currently set on the native window, so that the refresh passes can
-  // skip the remote call while the setting is unchanged.
+  // Opacity last applied to the native window, whether the setting or full
+  // opacity for the focused window, so that the refresh passes can skip the
+  // remote call while the target is unchanged.
   appliedOpacity?: number;
 
   trafficLightsHidden?: boolean;
@@ -1158,10 +1159,11 @@ export default class DesktopStickyNotesPlugin extends Plugin {
   }
 
   private prepareWindow(note: StickyNoteWindow): void {
-    // scheduleRefreshNote() uses plain timeouts, which outlive the plugin. A
-    // pass that runs after unload would decorate a window the plugin no longer
-    // owns and undo the opacity that unload has just restored.
-    if (this.unloaded || note.window.isDestroyed()) return;
+    // scheduleRefreshNote() uses plain timeouts, which outlive the plugin and
+    // the note. A pass that runs after unload, or after the note was untracked
+    // for closing, would decorate a window the plugin no longer owns and undo
+    // the opacity that was restored on the way out.
+    if (this.unloaded || !this.notesByPath.get(note.file.path)?.has(note) || note.window.isDestroyed()) return;
     const { document, window } = note;
     const nativeTitle = this.nativeNoteWindowTitle(note.file);
     const domWindow = document.defaultView;
@@ -1688,16 +1690,10 @@ export default class DesktopStickyNotesPlugin extends Plugin {
   private targetWindowOpacity(note: StickyNoteWindow): number {
     const { windowOpacity, opaqueWhileFocused } = this.settings;
     if (!opaqueWhileFocused || windowOpacity === FULL_WINDOW_OPACITY) return windowOpacity;
-    return this.isNativeWindowFocused(note.window) ? FULL_WINDOW_OPACITY : windowOpacity;
-  }
-
-  private isNativeWindowFocused(nativeWindow: NativeBrowserWindow): boolean {
-    try {
-      return !nativeWindow.isDestroyed() && nativeWindow.isFocused();
-    } catch {
-      // The remote proxy becomes invalid as soon as the window closes.
-      return false;
-    }
+    // The document's own focus state is what the focus and blur events that
+    // trigger this describe, so it agrees with them. The native window's state
+    // is a synchronous call into the main process and can lag those events.
+    return note.document.hasFocus() ? FULL_WINDOW_OPACITY : windowOpacity;
   }
 
   private setNativeOpacity(nativeWindow: NativeBrowserWindow, opacity: number): void {
