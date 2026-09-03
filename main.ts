@@ -261,7 +261,13 @@ export default class DesktopStickyNotesPlugin extends Plugin {
       colorsByPath: stored.colorsByPath ?? defaults.colorsByPath
     };
 
-    if (Object.prototype.hasOwnProperty.call(stored, "globalToggleShortcut")) {
+    // A stored opacity that was rejected or snapped to the slider's grid is
+    // written back, so that data.json and the value in use do not disagree
+    // until some unrelated setting happens to trigger the next save. A vault
+    // that never stored the key keeps its data.json untouched.
+    const opacityWasCorrected = Object.prototype.hasOwnProperty.call(stored, "windowOpacity")
+      && stored.windowOpacity !== this.settings.windowOpacity;
+    if (opacityWasCorrected || Object.prototype.hasOwnProperty.call(stored, "globalToggleShortcut")) {
       await this.saveSettings();
     }
   }
