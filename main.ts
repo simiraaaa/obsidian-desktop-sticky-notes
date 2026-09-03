@@ -239,7 +239,7 @@ function createDefaultSettings(): StickyNoteSettings {
     defaultFolder: "",
     defaultNoteColor: DEFAULT_COLOR,
     enableCollapsibleNotes: false,
-    restoreNotesOnStartup: false,
+    restoreNotesOnStartup: true,
     globalToggleShortcuts: { ...DEFAULT_GLOBAL_SHORTCUTS },
     topLevelNotePath: null,
     topLevelWindowPosition: null,
