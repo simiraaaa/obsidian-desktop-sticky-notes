@@ -171,8 +171,9 @@ interface StickyNoteWindow {
   document: Document;
   window: NativeBrowserWindow;
   observer?: MutationObserver;
-  // Opacity currently set on the native window, so that the refresh passes can
-  // skip the remote call while the setting is unchanged.
+  // Opacity last applied to the native window, whether the setting or full
+  // opacity for the focused window, so that the refresh passes can skip the
+  // remote call while the target is unchanged.
   appliedOpacity?: number;
 }
 
@@ -805,16 +806,10 @@ export default class DesktopStickyNotesPlugin extends Plugin {
   private targetWindowOpacity(note: StickyNoteWindow): number {
     const { windowOpacity, opaqueWhileFocused } = this.settings;
     if (!opaqueWhileFocused || windowOpacity === FULL_WINDOW_OPACITY) return windowOpacity;
-    return this.isNativeWindowFocused(note.window) ? FULL_WINDOW_OPACITY : windowOpacity;
-  }
-
-  private isNativeWindowFocused(nativeWindow: NativeBrowserWindow): boolean {
-    try {
-      return !nativeWindow.isDestroyed() && nativeWindow.isFocused();
-    } catch {
-      // The remote proxy becomes invalid as soon as the window closes.
-      return false;
-    }
+    // The document's own focus state is what the focus and blur events that
+    // trigger this describe, so it agrees with them. The native window's state
+    // is a synchronous call into the main process and can lag those events.
+    return note.document.hasFocus() ? FULL_WINDOW_OPACITY : windowOpacity;
   }
 
   private setNativeOpacity(nativeWindow: NativeBrowserWindow, opacity: number): void {
