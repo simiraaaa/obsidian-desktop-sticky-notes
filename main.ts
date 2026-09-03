@@ -308,7 +308,8 @@ export default class DesktopStickyNotesPlugin extends Plugin {
   private shortcutRegistrationTimer: number | null = null;
   private settingsSaveTimer: number | null = null;
   private pendingStateCaptures = new Set<StickyNoteWindow>();
-  private restoringNotes = false;
+  private restoringPath: string | null = null;
+  private unloaded = false;
   private toggleInProgress = false;
 
   async onload(): Promise<void> {
@@ -327,6 +328,10 @@ export default class DesktopStickyNotesPlugin extends Plugin {
   }
 
   onunload(): void {
+    // Restoring runs across awaits and outlives this call. It stops at its next
+    // step, and until then it must not suppress the capture below.
+    this.unloaded = true;
+    this.restoringPath = null;
     if (this.shortcutRegistrationTimer !== null) window.clearTimeout(this.shortcutRegistrationTimer);
     this.unregisterGlobalToggleShortcut();
     // Quitting Obsidian is what restoring exists for, so every path is captured
@@ -670,6 +675,7 @@ export default class DesktopStickyNotesPlugin extends Plugin {
     let failures = 0;
     let collapsingUnsupported = false;
     for (const [path, savedWindows] of Object.entries(this.settings.savedWindowsByPath)) {
+      if (this.unloaded) return;
       // Restoring hands control back between windows, so an entry that was
       // hidden in the meantime must not be reopened from the list this started
       // with.
@@ -683,19 +689,26 @@ export default class DesktopStickyNotesPlugin extends Plugin {
       // the same vault can be opened where that file has not been synced yet.
       if (!(file instanceof TFile) || this.notesByPath.has(path)) continue;
       const reopened = this.adoptablePopoutLeaves(path, savedWindows.length);
+      let opened = 0;
       // Recording a note snapshots every window it is open in, which while this
-      // list is only half reopened would replace it with that half. The note is
-      // recorded once, below, when all of its windows are up.
-      this.restoringNotes = true;
+      // list is only half reopened would replace it with that half. Only this
+      // note is held back: the user can still hide or move another one, and
+      // those notes have to keep recording for that to take effect.
+      this.restoringPath = path;
       try {
         for (const [index, saved] of savedWindows.entries()) {
+          if (this.unloaded) return;
           const collapse = saved.isCollapsed && this.settings.enableCollapsibleNotes && !collapsingUnsupported;
           try {
             const bounds = this.boundsOnCurrentDisplay(saved);
             // The windows open one at a time so that each exists, and has been
             // placed and collapsed, before the next takes the foreground.
             const note = await this.reopenStickyNote(file, bounds, reopened[index]);
-            if (!note) continue;
+            if (!note) {
+              failures++;
+              continue;
+            }
+            opened++;
             await this.applySavedWindow(note, saved, bounds, collapse);
             // Collapsing is refused by whole window managers rather than by
             // single windows, and every refusal warns the user. One is enough.
@@ -705,9 +718,12 @@ export default class DesktopStickyNotesPlugin extends Plugin {
           }
         }
       } finally {
-        this.restoringNotes = false;
+        this.restoringPath = null;
       }
-      this.rememberNoteStates(path);
+      // Only a note that came back whole is re-recorded. Snapshotting a partial
+      // reopen would replace the saved layout with the windows that happened to
+      // make it, so a note that failed keeps the list to try again from.
+      if (opened === savedWindows.length) this.rememberNoteStates(path);
     }
     // A restore that fails for every note is otherwise indistinguishable from
     // the feature not running at all.
@@ -1394,18 +1410,17 @@ export default class DesktopStickyNotesPlugin extends Plugin {
   }
 
   private capturePendingNoteStates(): void {
-    // Marks are held rather than dropped while notes are being reopened: the
-    // snapshot they would produce is suppressed, and restoring re-arms the
-    // timer for them as it records each note it finishes.
-    if (this.restoringNotes) return;
     // Marked notes are resolved to paths first: a note is saved together with
     // every other window on the same file, and dragging one window must not
     // snapshot that file once per window.
     const paths = new Set<string>();
-    for (const note of this.pendingStateCaptures) {
+    for (const note of [...this.pendingStateCaptures]) {
+      // A note whose windows are still being reopened stays marked rather than
+      // producing a snapshot of the part of its list that exists so far.
+      if (note.file.path === this.restoringPath) continue;
+      this.pendingStateCaptures.delete(note);
       if (this.isTracked(note)) paths.add(note.file.path);
     }
-    this.pendingStateCaptures.clear();
     for (const path of paths) this.captureNoteStates(path);
   }
 
@@ -1413,10 +1428,17 @@ export default class DesktopStickyNotesPlugin extends Plugin {
   // currently open in. Windows carry no identity of their own, so they cannot
   // be updated one by one.
   private captureNoteStates(path: string): void {
-    if (!this.settings.restoreNotesOnStartup || this.restoringNotes) return;
+    if (!this.settings.restoreNotesOnStartup) return;
+    // Held back while this note's own windows are being reopened: its list is
+    // only partly on screen, and a snapshot would replace the list with that.
+    if (path === this.restoringPath) return;
     // The top-level note is shown and hidden by its own toggle and keeps its
-    // own saved position, so it is never part of the restore list.
-    if (path === this.settings.topLevelNotePath) return;
+    // own saved position, so it is never part of the restore list. An entry
+    // that predates it becoming the top-level note is dropped here.
+    if (path === this.settings.topLevelNotePath) {
+      delete this.settings.savedWindowsByPath[path];
+      return;
+    }
     const previous = this.settings.savedWindowsByPath[path];
     const windows: SavedNoteWindow[] = [];
     for (const note of this.notesByPath.get(path) ?? []) {
