@@ -1111,7 +1111,12 @@ export default class DesktopStickyNotesPlugin extends Plugin {
 
   private watchForCancelledShutdown(domWindow: Window): void {
     this.registerDomEvent(domWindow, "pointerdown", this.releaseShutdownLatch);
-    this.registerDomEvent(domWindow, "keydown", this.releaseShutdownLatch);
+    // A chord with the command key is a command, not the user working on, and
+    // the quit shortcut itself is one of them: its keydown may reach the
+    // renderer after the signal it caused.
+    this.registerDomEvent(domWindow, "keydown", (event) => {
+      if (!event.metaKey && !event.ctrlKey) this.releaseShutdownLatch();
+    });
   }
 
   private watchWindowGeometry(note: StickyNoteWindow): void {
