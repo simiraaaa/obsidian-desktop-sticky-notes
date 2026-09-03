@@ -770,9 +770,10 @@ export default class DesktopStickyNotesPlugin extends Plugin {
           if (wantsCollapse && !note.isCollapsed) {
             // Collapsing is refused by whole window managers rather than by
             // single windows, and every refusal warns the user, so no further
-            // window is asked once one has been turned down. This one keeps the
-            // entry it was restored from: recording it would replace its saved
-            // collapsed flag with the state it is stuck in.
+            // window is asked once one has been turned down. Restoring leaves
+            // this window's entry as it found it rather than recording the
+            // expanded state it is stuck in; moving the window still records
+            // it, because from then on expanded is simply what it is.
             if (collapse) collapsingUnsupported = true;
             this.pendingStateCaptures.delete(note);
             continue;
