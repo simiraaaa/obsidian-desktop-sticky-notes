@@ -350,7 +350,6 @@ interface NativeBrowserWindow {
   setParentWindow(parent: NativeBrowserWindow | null): void;
   setSkipTaskbar(skip: boolean): void;
   setOpacity(opacity: number): void;
-  getOpacity(): number;
   close(): void;
   destroy(): void;
   getPosition(): [number, number];
@@ -372,12 +371,13 @@ export default class DesktopStickyNotesPlugin extends Plugin {
   private initializedLeaves = new WeakSet<WorkspaceLeaf>();
   private registeredGlobalShortcut: string | null = null;
   private shortcutRegistrationTimer: number | null = null;
+  private unloaded = false;
   private opacitySaveTimer: number | null = null;
+  private saveQueue: Promise<void> = Promise.resolve();
 
   private settingsSaveTimer: number | null = null;
   private pendingStateCaptures = new Set<StickyNoteWindow>();
   private restoringId: string | null = null;
-  private unloaded = false;
   private toggleInProgress = false;
 
   async onload(): Promise<void> {
@@ -399,6 +399,8 @@ export default class DesktopStickyNotesPlugin extends Plugin {
   }
 
   onunload(): void {
+    this.unloaded = true;
+
     // Restoring runs across awaits and outlives this call. It stops at its next
     // step, and until then it must not suppress the capture below.
     this.unloaded = true;
@@ -413,9 +415,6 @@ export default class DesktopStickyNotesPlugin extends Plugin {
     for (const note of [...this.allNotes()]) this.rememberNoteState(note);
     for (const note of [...this.allNotes()]) {
       this.rememberTopLevelPosition(note);
-      // The window is closed just below, so this matters only when that close
-      // does not go through: no window may outlive the plugin translucent with
-      // nothing left to restore it.
       this.restoreWindowOpacity(note);
 
       // Restore the traffic lights in case the window outlives the close below.
@@ -467,13 +466,26 @@ export default class DesktopStickyNotesPlugin extends Plugin {
       savedWindowsByPath: parseSavedNoteWindows(stored.savedWindowsByPath)
     };
 
-    if (Object.prototype.hasOwnProperty.call(stored, "globalToggleShortcut")) {
+    // A stored opacity that was rejected or snapped to the slider's grid is
+    // written back, so that data.json and the value in use do not disagree
+    // until some unrelated setting happens to trigger the next save. A vault
+    // that never stored the key keeps its data.json untouched.
+    const opacityWasCorrected = Object.prototype.hasOwnProperty.call(stored, "windowOpacity")
+      && stored.windowOpacity !== this.settings.windowOpacity;
+    if (opacityWasCorrected || Object.prototype.hasOwnProperty.call(stored, "globalToggleShortcut")) {
       await this.saveSettings();
     }
   }
 
   async saveSettings(): Promise<void> {
-    await this.saveData(this.settings);
+    // Most callers start a save without awaiting it, and saveData() serializes
+    // the settings when it runs. Two overlapping writes can therefore finish in
+    // either order and leave data.json holding the older of the two states, so
+    // every write goes through one chain and reads the settings when its turn
+    // comes. A failed write does not stall the chain for the writes behind it.
+    const write = this.saveQueue.then(() => this.saveData(this.settings));
+    this.saveQueue = write.catch(() => undefined);
+    await write;
   }
 
   scheduleGlobalShortcutRegistration(): void {
@@ -1105,7 +1117,10 @@ export default class DesktopStickyNotesPlugin extends Plugin {
   }
 
   private prepareWindow(note: StickyNoteWindow): void {
-    if (note.window.isDestroyed()) return;
+    // scheduleRefreshNote() uses plain timeouts, which outlive the plugin. A
+    // pass that runs after unload would decorate a window the plugin no longer
+    // owns and undo the opacity that unload has just restored.
+    if (this.unloaded || note.window.isDestroyed()) return;
     const { document, window } = note;
     const nativeTitle = this.nativeNoteWindowTitle(note.file);
     const domWindow = document.defaultView;
@@ -1611,6 +1626,9 @@ export default class DesktopStickyNotesPlugin extends Plugin {
     note.appliedOpacity = opacity;
   }
 
+  // Called before a window is closed. The close normally makes this moot, but a
+  // window that survives it must not be left translucent with nothing tracking
+  // it any more.
   private restoreWindowOpacity(note: StickyNoteWindow): void {
     if (note.appliedOpacity === undefined || note.appliedOpacity === FULL_WINDOW_OPACITY) return;
     this.setNativeOpacity(note.window, FULL_WINDOW_OPACITY);
@@ -1650,6 +1668,7 @@ export default class DesktopStickyNotesPlugin extends Plugin {
     const notes = [...(this.notesByPath.get(path) ?? [])];
     for (const note of notes) {
       this.rememberTopLevelPosition(note);
+      this.restoreWindowOpacity(note);
       this.clearWindowMarker(note);
       this.untrackNote(note);
       note.leaf.detach();
@@ -1668,6 +1687,7 @@ export default class DesktopStickyNotesPlugin extends Plugin {
 
   private hideNote(note: StickyNoteWindow): void {
     this.rememberTopLevelPosition(note);
+    this.restoreWindowOpacity(note);
     this.clearWindowMarker(note);
     this.untrackNote(note);
     this.dismissNoteState(note);
@@ -2048,7 +2068,6 @@ class DesktopStickyNotesSettingTab extends PluginSettingTab {
   private addWindowOpacityControl(setting: Setting): void {
     setting.addSlider((slider) => slider
       .setLimits(MIN_WINDOW_OPACITY, FULL_WINDOW_OPACITY, WINDOW_OPACITY_STEP)
-      .setDynamicTooltip()
       .setValue(this.plugin.settings.windowOpacity)
       .onChange((value) => this.plugin.setWindowOpacity(value)));
   }
