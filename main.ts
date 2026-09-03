@@ -168,16 +168,23 @@ function finiteNumber(value: unknown): number | null {
   return typeof value === "number" && Number.isFinite(value) ? value : null;
 }
 
-function positiveNumber(value: unknown): number | null {
+function wholePixels(value: unknown): number | null {
   const parsed = finiteNumber(value);
+  // Window geometry is whole device-independent pixels. Rounding here keeps a
+  // fractional stored value from reaching the window manager unchanged.
+  return parsed === null ? null : Math.round(parsed);
+}
+
+function positivePixels(value: unknown): number | null {
+  const parsed = wholePixels(value);
   return parsed !== null && parsed > 0 ? parsed : null;
 }
 
 function parseWindowSize(value: unknown): WindowSize | null {
   if (typeof value !== "object" || value === null) return null;
   const { width, height } = value as Record<string, unknown>;
-  const parsedWidth = positiveNumber(width);
-  const parsedHeight = positiveNumber(height);
+  const parsedWidth = positivePixels(width);
+  const parsedHeight = positivePixels(height);
   if (parsedWidth === null || parsedHeight === null) return null;
   return { width: parsedWidth, height: parsedHeight };
 }
@@ -186,8 +193,8 @@ function parseWindowBounds(value: unknown): WindowBounds | null {
   const size = parseWindowSize(value);
   if (!size) return null;
   const { x, y } = value as Record<string, unknown>;
-  const parsedX = finiteNumber(x);
-  const parsedY = finiteNumber(y);
+  const parsedX = wholePixels(x);
+  const parsedY = wholePixels(y);
   if (parsedX === null || parsedY === null) return null;
   return { x: parsedX, y: parsedY, ...size };
 }
@@ -293,6 +300,7 @@ export default class DesktopStickyNotesPlugin extends Plugin {
   private registeredGlobalShortcut: string | null = null;
   private shortcutRegistrationTimer: number | null = null;
   private settingsSaveTimer: number | null = null;
+  private pendingStateCaptures = new Set<StickyNoteWindow>();
   private toggleInProgress = false;
 
   async onload(): Promise<void> {
@@ -317,8 +325,7 @@ export default class DesktopStickyNotesPlugin extends Plugin {
       this.rememberTopLevelPosition(note);
       // Quitting Obsidian is what restoring exists for, so the geometry is
       // captured here even though the window events already record it: the
-      // debounced write may still be pending, and a window that never moved
-      // has not produced an event at all.
+      // debounced write may still be pending.
       this.rememberNoteState(note);
       this.unwatchWindowGeometry(note);
       note.observer?.disconnect();
@@ -617,7 +624,7 @@ export default class DesktopStickyNotesPlugin extends Plugin {
     if (enabled) {
       // Notes that are already open would otherwise only enter the list once
       // they are moved, which makes the setting look like it did nothing.
-      for (const note of this.allNotes()) this.rememberNoteState(note);
+      for (const note of this.allNotes()) this.captureNoteState(note);
     } else {
       // Keeping the list while it is not used would restore a stale desktop
       // whenever the setting is switched back on.
@@ -634,7 +641,8 @@ export default class DesktopStickyNotesPlugin extends Plugin {
     await this.saveSettings();
     // A note that just stopped being the top-level note becomes an ordinary
     // sticky note and joins the restore list from here on.
-    for (const note of this.allNotes()) this.rememberNoteState(note);
+    for (const note of this.allNotes()) this.captureNoteState(note);
+    this.scheduleSettingsSave();
     this.scheduleRefreshAllNotes();
     new Notice(path ? `Top-level sticky note: ${path}` : "Top-level sticky note cleared.");
   }
@@ -652,7 +660,16 @@ export default class DesktopStickyNotesPlugin extends Plugin {
 
   private async restoreSavedNotes(): Promise<void> {
     if (!this.settings.restoreNotesOnStartup) return;
+    // Obsidian deserializes its own popouts as part of the layout, which is
+    // only complete now: the same cleanup in onload() runs before that and can
+    // miss them. Reopening a note that is already on screen would show it
+    // twice, so the cleanup is repeated here rather than assumed to have run.
+    this.closeStaleStickyWindows();
+    let failures = 0;
     for (const [path, saved] of Object.entries(this.settings.savedWindowsByPath)) {
+      // Restoring hands control back between notes, so an entry that was hidden
+      // in the meantime must not be reopened from the list this started with.
+      if (!(path in this.settings.savedWindowsByPath)) continue;
       const file = this.app.vault.getAbstractFileByPath(path);
       // An entry whose file is missing right now is kept rather than dropped:
       // the same vault can be opened where that file has not been synced yet.
@@ -664,9 +681,12 @@ export default class DesktopStickyNotesPlugin extends Plugin {
         const note = await this.openStickyNote(file, bounds);
         if (note) await this.applySavedWindow(note, saved, bounds);
       } catch {
-        // One note that cannot be reopened must not stop the remaining ones.
+        failures++;
       }
     }
+    // A restore that fails for every note is otherwise indistinguishable from
+    // the feature not running at all.
+    if (failures) new Notice(`Could not restore ${failures} sticky note${failures === 1 ? "" : "s"}.`);
   }
 
   private async applySavedWindow(note: StickyNoteWindow, saved: SavedNoteWindow, bounds: WindowBounds): Promise<void> {
@@ -811,11 +831,12 @@ export default class DesktopStickyNotesPlugin extends Plugin {
     const { window } = note;
     if (note.geometryListener || window.isDestroyed()) return;
     // These fire in the main process and reach the plugin over the remote
-    // bridge. "move" and "resize" repeat throughout a drag, so the listener
-    // only updates the in-memory state and defers the write to disk.
-    // "moved" and "resized" are deliberately not used: they never fire on
-    // Linux, and the debounced write already collapses a whole drag into one.
-    const listener = () => this.rememberNoteState(note);
+    // bridge. "move" and "resize" repeat throughout a drag, and every window
+    // property has to be read back across that bridge, so the listener records
+    // nothing itself and lets the debounced timer read the window once.
+    // "moved" and "resized" are not used: Electron documents both for macOS and
+    // Windows only, and the debounced read already covers a whole drag.
+    const listener = () => this.scheduleNoteStateCapture(note);
     note.geometryListener = listener;
     window.on("move", listener);
     window.on("resize", listener);
@@ -825,13 +846,14 @@ export default class DesktopStickyNotesPlugin extends Plugin {
     const listener = note.geometryListener;
     if (!listener) return;
     delete note.geometryListener;
+    this.pendingStateCaptures.delete(note);
     try {
       if (note.window.isDestroyed()) return;
       note.window.removeListener("move", listener);
       note.window.removeListener("resize", listener);
     } catch {
-      // The remote proxy becomes invalid as soon as the window closes, which
-      // also releases the listener it was holding.
+      // The remote proxy becomes invalid as soon as the window closes, so a
+      // window that is already gone cannot be asked to drop the listener.
     }
   }
 
@@ -1225,10 +1247,12 @@ export default class DesktopStickyNotesPlugin extends Plugin {
   }
 
   private hideNote(note: StickyNoteWindow): void {
-    this.forgetNoteState(note.file.path);
     this.rememberTopLevelPosition(note);
     this.clearWindowMarker(note);
     this.untrackNote(note);
+    // Only the last window for a file dismisses the note. One file can be open
+    // in several sticky windows, and they share the single entry under its path.
+    if (!this.notesByPath.has(note.file.path)) this.forgetNoteState(note.file.path);
     note.leaf.detach();
     this.forceCloseWindow(note.window);
     void this.app.workspace.requestSaveLayout();
@@ -1298,19 +1322,44 @@ export default class DesktopStickyNotesPlugin extends Plugin {
   }
 
   private rememberNoteState(note: StickyNoteWindow): void {
+    this.captureNoteState(note);
+    this.scheduleSettingsSave();
+  }
+
+  // Used by the window events, which arrive continuously while a window is
+  // dragged. Reading a window's geometry means a blocking call into the main
+  // process for every property, so the events only mark the note and the
+  // debounced timer reads the window once per movement.
+  private scheduleNoteStateCapture(note: StickyNoteWindow): void {
+    this.pendingStateCaptures.add(note);
+    this.scheduleSettingsSave();
+  }
+
+  private capturePendingNoteStates(): void {
+    for (const note of [...this.pendingStateCaptures]) {
+      this.pendingStateCaptures.delete(note);
+      if (this.isTracked(note)) this.captureNoteState(note);
+    }
+  }
+
+  private captureNoteState(note: StickyNoteWindow): void {
     if (!this.settings.restoreNotesOnStartup) return;
     if (note.file.path === this.settings.topLevelNotePath) return;
     try {
       const bounds = this.expandedBounds(note);
       if (!bounds) return;
       const { width, height } = screen.getDisplayMatching(bounds).workArea;
+      const previous = this.settings.savedWindowsByPath[note.file.path];
       this.settings.savedWindowsByPath[note.file.path] = {
         bounds,
         workArea: { width, height },
         isPinned: note.window.isAlwaysOnTop(),
-        isCollapsed: note.isCollapsed
+        // While the collapse feature is off no window can report itself
+        // collapsed, so recording the flag would erase it for every note that
+        // was collapsed when the feature was switched off. The stored flag is
+        // kept until a window is able to change it again.
+        isCollapsed: this.settings.enableCollapsibleNotes ? note.isCollapsed : previous?.isCollapsed ?? false
       };
-      this.scheduleSettingsSave();
     } catch {
       // The remote proxy becomes invalid as soon as a window closes. The state
       // recorded before that is the last one worth restoring.
@@ -1349,6 +1398,7 @@ export default class DesktopStickyNotesPlugin extends Plugin {
     if (this.settingsSaveTimer !== null) window.clearTimeout(this.settingsSaveTimer);
     this.settingsSaveTimer = window.setTimeout(() => {
       this.settingsSaveTimer = null;
+      this.capturePendingNoteStates();
       void this.saveSettings();
     }, SETTINGS_SAVE_DEBOUNCE_MS);
   }
@@ -1357,6 +1407,9 @@ export default class DesktopStickyNotesPlugin extends Plugin {
     if (this.settingsSaveTimer === null) return;
     window.clearTimeout(this.settingsSaveTimer);
     this.settingsSaveTimer = null;
+    this.capturePendingNoteStates();
+    // saveData() is asynchronous and onunload() cannot await it, so a change
+    // made moments before Obsidian quits may not reach disk.
     void this.saveSettings();
   }
 
