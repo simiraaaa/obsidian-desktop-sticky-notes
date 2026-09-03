@@ -324,7 +324,10 @@ export default class DesktopStickyNotesPlugin extends Plugin {
     this.registerEvent(this.app.workspace.on("layout-change", () => this.scheduleRefreshAllNotes()));
     // Waits for the layout because Obsidian deserializes its own popouts as
     // part of it, and a note it reopened by itself must not be opened twice.
-    this.app.workspace.onLayoutReady(() => void this.restoreSavedNotes());
+    this.app.workspace.onLayoutReady(() => {
+      this.adoptTopLevelNotePopouts();
+      void this.restoreSavedNotes();
+    });
   }
 
   onunload(): void {
@@ -800,6 +803,25 @@ export default class DesktopStickyNotesPlugin extends Plugin {
     // rather than being lost along with it.
     const adopted = reopened ? this.initializeStickyLeaf(file, reopened) : null;
     return adopted ?? this.openStickyNote(file, bounds);
+  }
+
+  // The top-level note is never saved or restored, because its own toggle
+  // decides when it is shown. Obsidian still reopens the popout it was in from
+  // its own layout, and left alone that is a plain popout the toggle does not
+  // recognise, so toggling opens a second window onto the same note. The window
+  // is adopted rather than closed: it is on screen either way, adopting it lets
+  // the toggle hide it as usual, and closing it would make a note the user left
+  // open disappear at startup without being asked.
+  private adoptTopLevelNotePopouts(): void {
+    const path = this.settings.topLevelNotePath;
+    if (!path) return;
+    const file = this.app.vault.getAbstractFileByPath(path);
+    if (!(file instanceof TFile)) return;
+    for (const leaf of this.plainPopoutLeavesForPath(path)) {
+      // A leaf whose native window cannot be found is left in place: detaching
+      // it would close a window the toggle can at least still replace.
+      this.initializeStickyLeaf(file, leaf, false);
+    }
   }
 
   private noteIsStillRestorable(path: string, file: TFile): boolean {
