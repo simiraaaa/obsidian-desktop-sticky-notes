@@ -1,6 +1,6 @@
 import { MarkdownView, Notice, Platform, Plugin, PluginSettingTab, Setting, TAbstractFile, TFile, WorkspaceLeaf, normalizePath, setIcon, setTooltip } from "obsidian";
 import type { SettingDefinitionItem } from "obsidian";
-import { BrowserWindow, globalShortcut, screen } from "@electron/remote";
+import { BrowserWindow, app as electronApp, globalShortcut, screen } from "@electron/remote";
 
 const DEFAULT_COLOR = "#fff3a3";
 const DEFAULT_WIDTH = 360;
@@ -378,6 +378,10 @@ export default class DesktopStickyNotesPlugin extends Plugin {
   private settingsSaveTimer: number | null = null;
   private pendingStateCaptures = new Set<StickyNoteWindow>();
   private restoringId: string | null = null;
+  // Set once Obsidian itself is quitting or reloading. A sticky window that
+  // closes afterwards is not being dismissed by the user and must come back.
+  private shuttingDown = false;
+  private readonly markShuttingDown = () => { this.shuttingDown = true; };
   private toggleInProgress = false;
 
   async onload(): Promise<void> {
@@ -396,6 +400,12 @@ export default class DesktopStickyNotesPlugin extends Plugin {
       this.adoptTopLevelNotePopouts();
       void this.restoreSavedNotes();
     });
+    // Quitting reaches the plugin through the main process a few milliseconds
+    // before the sticky windows start closing, and reloading through the main
+    // window's own unload. Either one means the closing windows are not being
+    // dismissed by the user.
+    electronApp.on("before-quit", this.markShuttingDown);
+    this.registerDomEvent(window, "beforeunload", this.markShuttingDown);
   }
 
   onunload(): void {
@@ -404,6 +414,12 @@ export default class DesktopStickyNotesPlugin extends Plugin {
     // Restoring runs across awaits and outlives this call. It stops at its next
     // step, and until then it must not suppress the capture below.
     this.unloaded = true;
+    this.shuttingDown = true;
+    try {
+      electronApp.removeListener("before-quit", this.markShuttingDown);
+    } catch {
+      // The remote proxy can be gone already while Obsidian is shutting down.
+    }
     this.restoringId = null;
     if (this.shortcutRegistrationTimer !== null) window.clearTimeout(this.shortcutRegistrationTimer);
     this.flushWindowOpacitySave();
@@ -1105,12 +1121,11 @@ export default class DesktopStickyNotesPlugin extends Plugin {
     this.rememberNoteState(note);
     this.registerDomEvent(domWindow, "beforeunload", () => {
       this.rememberTopLevelPosition(note);
-      // The saved list is deliberately not rebuilt here. A snapshot holds the
-      // windows that are open at the time it is taken, so rebuilding while
-      // windows are closing would drop every sibling that closed first, and
-      // quitting Obsidian would save one window in place of all of them. A
-      // window that closed on its own therefore keeps its saved entry until the
-      // note is next recorded for some other reason.
+      // Hiding untracks the note before its window closes, so a window that is
+      // still tracked here was closed some other way. Unless Obsidian is
+      // quitting or reloading, that was the user closing the window through
+      // its frame, which dismisses the window just like the hide button does.
+      if (this.isTracked(note) && !this.shuttingDown) this.dismissNoteState(note);
       this.untrackNote(note);
     });
     return note;
