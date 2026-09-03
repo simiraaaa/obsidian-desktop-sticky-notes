@@ -1439,10 +1439,15 @@ export default class DesktopStickyNotesPlugin extends Plugin {
       delete this.settings.savedWindowsByPath[path];
       return;
     }
+    const notes = this.notesByPath.get(path) ?? new Set<StickyNoteWindow>();
     const previous = this.settings.savedWindowsByPath[path];
+    // Windows carry no identity, so a saved entry can only be matched to a live
+    // window by position, and that only holds while their number is unchanged.
+    // A note that has gained or lost a window has no such match.
+    const matching = previous?.length === notes.size ? previous : undefined;
     const windows: SavedNoteWindow[] = [];
-    for (const note of this.notesByPath.get(path) ?? []) {
-      const state = this.noteWindowState(note, previous?.[windows.length]);
+    for (const note of notes) {
+      const state = this.noteWindowState(note, matching?.[windows.length]);
       if (state) windows.push(state);
     }
     if (windows.length) {
@@ -1463,11 +1468,9 @@ export default class DesktopStickyNotesPlugin extends Plugin {
         isPinned: note.window.isAlwaysOnTop(),
         // While the collapse feature is off no window can report itself
         // collapsed, so recording the flag would erase it for every note that
-        // was collapsed when the feature was switched off. The stored flag is
-        // kept until a window is able to change it again. Windows have no
-        // identity, so the entry in the same position is the best match there
-        // is; the order only changes when a window is opened or closed, which
-        // is also when a stale flag stops mattering.
+        // was collapsed when the feature was switched off. The flag saved for
+        // this window is carried over instead, until a window is able to change
+        // it again.
         isCollapsed: this.settings.enableCollapsibleNotes ? note.isCollapsed : previous?.isCollapsed ?? false
       };
     } catch {
