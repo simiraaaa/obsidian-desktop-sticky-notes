@@ -727,7 +727,12 @@ export default class DesktopStickyNotesPlugin extends Plugin {
           // hands control back, and in that time the note can be hidden, its
           // file deleted or renamed, or it can become the top-level note.
           if (this.unloaded || !this.noteIsStillRestorable(path, file)) break;
-          const collapse = saved.isCollapsed && this.settings.enableCollapsibleNotes && !collapsingUnsupported;
+          // Whether this window was saved collapsed does not depend on another
+          // note's window manager having refused. Only the attempt does: a
+          // window left expanded either way must not have its saved flag
+          // replaced with the state it is stuck in.
+          const wantsCollapse = saved.isCollapsed && this.settings.enableCollapsibleNotes;
+          const collapse = wantsCollapse && !collapsingUnsupported;
           try {
             const bounds = this.boundsOnCurrentDisplay(saved);
             // The windows open one at a time so that each exists, and has been
@@ -742,13 +747,11 @@ export default class DesktopStickyNotesPlugin extends Plugin {
               failures++;
               continue;
             }
-            // Collapsing is refused by whole window managers rather than by
-            // single windows, and every refusal warns the user. One is enough.
-            // The window is left open, but it did not reach its saved state, so
-            // it does not count towards re-recording the note: a snapshot would
-            // replace its saved collapsed flag with the state it is stuck in.
-            if (collapse && !note.isCollapsed) {
-              collapsingUnsupported = true;
+            if (wantsCollapse && !note.isCollapsed) {
+              // Collapsing is refused by whole window managers rather than by
+              // single windows, and every refusal warns the user, so no further
+              // window is asked once one has been turned down.
+              if (collapse) collapsingUnsupported = true;
               continue;
             }
             restored++;
