@@ -460,11 +460,12 @@ export default class DesktopStickyNotesPlugin extends Plugin {
     // dismissed by the user.
     electronApp.on("before-quit", this.markShuttingDown);
     this.registerDomEvent(window, "beforeunload", this.markShuttingDown);
-    // Opening Obsidian while it is already running, from the Dock or from a
-    // launcher, only brings its focused window forward; when that is a pinned
-    // note the main window stays behind the other applications. Clicking one
-    // of Obsidian's windows does not raise this event, so a note the user
-    // clicked into keeps its focus.
+    // macOS only: opening Obsidian while it is already running, from the Dock
+    // or from a launcher, only brings its focused window forward; when that is
+    // a pinned note the main window stays behind the other applications.
+    // Clicking one of Obsidian's windows does not raise this event, so a note
+    // the user clicked into keeps its focus. Electron raises it nowhere else,
+    // and there the main window comes forward by itself.
     electronApp.on("activate", this.onAppActivate);
     // Obsidian's own quit event crosses no process boundary, so it does not
     // depend on the main process's before-quit winning its race with the
@@ -482,11 +483,17 @@ export default class DesktopStickyNotesPlugin extends Plugin {
     // step, and until then it must not suppress the capture below.
     this.unloaded = true;
     this.unloadedAt = performance.now();
+    // Each on its own: the remote proxy can be gone already while Obsidian is
+    // shutting down, and one failing must not leave the other registered.
     try {
       electronApp.removeListener("before-quit", this.markShuttingDown);
+    } catch {
+      // See above.
+    }
+    try {
       electronApp.removeListener("activate", this.onAppActivate);
     } catch {
-      // The remote proxy can be gone already while Obsidian is shutting down.
+      // See above.
     }
     this.restoringId = null;
     if (this.shortcutRegistrationTimer !== null) window.clearTimeout(this.shortcutRegistrationTimer);
@@ -1068,8 +1075,9 @@ export default class DesktopStickyNotesPlugin extends Plugin {
   // application, so the user who has switched away during startup is not
   // pulled back.
   // The event arrives while the application is still becoming active, and
-  // which window holds the focus settles after that; Obsidian waits 100ms for
-  // the same reason when one of its windows gains the focus.
+  // which window holds the focus settles after that; Obsidian's own window
+  // container waits 100ms for the same reason when its window gains the focus
+  // before it reads which document has it.
   private readonly onAppActivate = () => {
     window.setTimeout(() => this.returnFocusToMainWindow(), FOCUS_SETTLE_MS);
   };
@@ -1087,6 +1095,9 @@ export default class DesktopStickyNotesPlugin extends Plugin {
     if (!stickyNoteHasFocus) return;
     const mainWindow = this.nativeMainWindow();
     if (!mainWindow || mainWindow.isDestroyed()) return;
+    // Focusing does not bring a minimized window back, as Obsidian's own
+    // container focus does before it.
+    if (mainWindow.isMinimized()) mainWindow.restore();
     mainWindow.focus();
   }
 
