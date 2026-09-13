@@ -372,7 +372,7 @@ export default class DesktopStickyNotesPlugin extends Plugin {
     // part of it, and a note it reopened by itself must not be opened twice.
     this.app.workspace.onLayoutReady(() => {
       this.adoptTopLevelNotePopouts();
-      void this.restoreSavedNotes();
+      void this.restoreSavedNotes().then(() => this.returnFocusToMainWindow());
     });
     // Quitting reaches the plugin through the main process a few milliseconds
     // before the sticky windows start closing, and reloading through the main
@@ -923,6 +923,32 @@ export default class DesktopStickyNotesPlugin extends Plugin {
       // open is the worse of the two, so it stays.
       this.initializeStickyLeaf(file, leaf, { detachOnFailure: false });
     }
+  }
+
+  // Every window that comes back at startup takes the focus as it opens,
+  // whether Obsidian reopened it from its layout or the plugin opened it for a
+  // saved entry, so the last of them has the focus once restoring is done. The
+  // user opened Obsidian to work in Obsidian, though, not in whichever note
+  // happened to come back last; and a pinned note is not a child of the main
+  // window, so with the focus on it the main window is not even in front. The
+  // focus is handed back to the main window. Only when a sticky note holds it:
+  // a window is only reported focused while Obsidian is the active
+  // application, so the user who has switched away during startup is not
+  // pulled back.
+  private returnFocusToMainWindow(): void {
+    if (this.unloaded) return;
+    const stickyNoteHasFocus = [...this.allNotes()].some((note) => {
+      try {
+        return !note.window.isDestroyed() && note.window.isFocused();
+      } catch {
+        // A window that has died since cannot be the one holding the focus.
+        return false;
+      }
+    });
+    if (!stickyNoteHasFocus) return;
+    const mainWindow = this.nativeMainWindow();
+    if (!mainWindow || mainWindow.isDestroyed()) return;
+    mainWindow.focus();
   }
 
   // Reading a window is a call into the main process, which throws once that
