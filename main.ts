@@ -1883,32 +1883,45 @@ export default class DesktopStickyNotesPlugin extends Plugin {
   private keepNavigationOutOfStickyWindows(): void {
     const { workspace } = this.app;
     const originalMostRecentLeaf = workspace.getMostRecentLeaf.bind(workspace);
-    const originalUnpinnedLeaf = workspace.getUnpinnedLeaf.bind(workspace);
+    // Obsidian's own callers pass a flag that is not in the typings: false
+    // means the leaf is handed back without being made the active leaf.
+    const originalUnpinnedLeaf: (activate?: boolean) => WorkspaceLeaf = workspace.getUnpinnedLeaf.bind(workspace);
 
     const getMostRecentLeaf: Workspace["getMostRecentLeaf"] = (root) => {
-      if (root) return originalMostRecentLeaf(root);
+      // With no sticky note open there is nothing to leave out, and that
+      // includes after the plugin has unloaded: the wrapper then passes
+      // straight through.
+      if (root || !this.notesByPath.size) return originalMostRecentLeaf(root);
       // Obsidian's default is the main window and every popout, as an array
       // of roots. The same array without the sticky windows keeps its choice
-      // among the remaining windows exactly as it would have been.
-      return originalMostRecentLeaf(this.rootsOutsideStickyWindows() as unknown as WorkspaceParent);
+      // among the remaining windows exactly as it would have been. Taking an
+      // array is not part of the API, so a version that stops doing so, and
+      // answers with nothing, gets Obsidian's own answer instead.
+      return originalMostRecentLeaf(this.rootsOutsideStickyWindows() as unknown as WorkspaceParent)
+        ?? originalMostRecentLeaf();
     };
-    const getUnpinnedLeaf: Workspace["getUnpinnedLeaf"] = () => {
+    const getUnpinnedLeaf = (activate = true): WorkspaceLeaf => {
       const active = workspace.getActiveViewOfType(View)?.leaf;
-      if (!active || !this.leafIsInStickyWindow(active)) return originalUnpinnedLeaf();
+      if (!active || !this.leafIsInStickyWindow(active)) return originalUnpinnedLeaf(activate);
       const recent = workspace.getMostRecentLeaf();
-      if (recent && recent.view.navigation && !recent.getViewState().pinned) return recent;
-      // Nothing outside the sticky windows can be navigated, so a new tab is
-      // opened beside the most recent leaf there, which is what Obsidian does
-      // when the active leaf is pinned.
-      return workspace.getLeaf(true);
+      // A leaf that cannot be navigated, because its tab is pinned or its view
+      // is not a file view, gets a new tab beside it, as Obsidian does when
+      // the active leaf is pinned.
+      const leaf = recent && recent.view.navigation && !recent.getViewState().pinned
+        ? recent
+        : workspace.getLeaf(true);
+      // The leaf Obsidian hands out is the active leaf, and opening a file
+      // without saying otherwise activates the leaf only if it already is.
+      if (activate) workspace.setActiveLeaf(leaf);
+      return leaf;
     };
 
     workspace.getMostRecentLeaf = getMostRecentLeaf;
     workspace.getUnpinnedLeaf = getUnpinnedLeaf;
     this.register(() => {
       // Another plugin may have wrapped these since. Its wrapper still calls
-      // through to ours, which needs nothing from the unloaded plugin, so it is
-      // left in place rather than cut out from under that plugin.
+      // through to ours, which passes straight through once the notes are
+      // gone, so it is left in place rather than cut out from under that plugin.
       if (workspace.getMostRecentLeaf === getMostRecentLeaf) workspace.getMostRecentLeaf = originalMostRecentLeaf;
       if (workspace.getUnpinnedLeaf === getUnpinnedLeaf) workspace.getUnpinnedLeaf = originalUnpinnedLeaf;
     });
