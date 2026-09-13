@@ -430,7 +430,9 @@ export default class DesktopStickyNotesPlugin extends Plugin {
     // part of it, and a note it reopened by itself must not be opened twice.
     this.app.workspace.onLayoutReady(() => {
       this.adoptTopLevelNotePopouts();
-      void this.restoreSavedNotes().then(() => this.returnFocusToMainWindow());
+      // The focus goes back whether or not every note made it: a restore that
+      // stopped part-way has still left the windows it did open in front.
+      void this.restoreSavedNotes().finally(() => this.returnFocusToMainWindow());
     });
     // Quitting reaches the plugin through the main process a few milliseconds
     // before the sticky windows start closing, and reloading through the main
@@ -1346,10 +1348,14 @@ export default class DesktopStickyNotesPlugin extends Plugin {
     const previousTitle = mainDocument.title;
     const marker = `desktop-sticky-notes-main-${crypto.randomUUID()}`;
     mainDocument.title = marker;
-    const mainWindow = (BrowserWindow.getAllWindows() as unknown as NativeBrowserWindow[])
-      .find((candidate) => !candidate.isDestroyed() && candidate.getTitle() === marker) ?? null;
-    mainDocument.title = previousTitle;
-    return mainWindow;
+    try {
+      return (BrowserWindow.getAllWindows() as unknown as NativeBrowserWindow[])
+        .find((candidate) => !candidate.isDestroyed() && candidate.getTitle() === marker) ?? null;
+    } finally {
+      // Reading a window that closes between the two calls throws, and the
+      // marker must not be left as the main window's visible title.
+      mainDocument.title = previousTitle;
+    }
   }
 
   private observePresentation(note: StickyNoteWindow): void {
