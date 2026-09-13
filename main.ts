@@ -18,6 +18,7 @@ const SETTINGS_SAVE_DEBOUNCE_MS = 500;
 const SHUTDOWN_RACE_SLACK_MS = 250;
 const HEADER_MEASURE_ATTEMPTS = 20;
 const HEADER_MEASURE_INTERVAL_MS = 50;
+const FOCUS_SETTLE_MS = 100;
 
 type DesktopPlatform = "linux" | "macos" | "windows";
 
@@ -440,6 +441,12 @@ export default class DesktopStickyNotesPlugin extends Plugin {
     // dismissed by the user.
     electronApp.on("before-quit", this.markShuttingDown);
     this.registerDomEvent(window, "beforeunload", this.markShuttingDown);
+    // Opening Obsidian while it is already running, from the Dock or from a
+    // launcher, only brings its focused window forward; when that is a pinned
+    // note the main window stays behind the other applications. Clicking one
+    // of Obsidian's windows does not raise this event, so a note the user
+    // clicked into keeps its focus.
+    electronApp.on("activate", this.onAppActivate);
     // Obsidian's own quit event crosses no process boundary, so it does not
     // depend on the main process's before-quit winning its race with the
     // windows it is announcing the closure of. Its API says it is not
@@ -458,6 +465,7 @@ export default class DesktopStickyNotesPlugin extends Plugin {
     this.unloadedAt = performance.now();
     try {
       electronApp.removeListener("before-quit", this.markShuttingDown);
+      electronApp.removeListener("activate", this.onAppActivate);
     } catch {
       // The remote proxy can be gone already while Obsidian is shutting down.
     }
@@ -1040,6 +1048,13 @@ export default class DesktopStickyNotesPlugin extends Plugin {
   // a window is only reported focused while Obsidian is the active
   // application, so the user who has switched away during startup is not
   // pulled back.
+  // The event arrives while the application is still becoming active, and
+  // which window holds the focus settles after that; Obsidian waits 100ms for
+  // the same reason when one of its windows gains the focus.
+  private readonly onAppActivate = () => {
+    window.setTimeout(() => this.returnFocusToMainWindow(), FOCUS_SETTLE_MS);
+  };
+
   private returnFocusToMainWindow(): void {
     if (this.unloaded) return;
     const stickyNoteHasFocus = [...this.allNotes()].some((note) => {
