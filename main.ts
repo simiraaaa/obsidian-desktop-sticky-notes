@@ -1,5 +1,5 @@
-import { MarkdownView, Notice, Platform, Plugin, PluginSettingTab, Setting, TAbstractFile, TFile, WorkspaceLeaf, normalizePath, setIcon, setTooltip } from "obsidian";
-import type { SettingDefinitionItem } from "obsidian";
+import { MarkdownView, Notice, Platform, Plugin, PluginSettingTab, Setting, TAbstractFile, TFile, View, WorkspaceLeaf, normalizePath, setIcon, setTooltip } from "obsidian";
+import type { SettingDefinitionItem, Workspace, WorkspaceContainer, WorkspaceParent } from "obsidian";
 import { BrowserWindow, globalShortcut, screen } from "@electron/remote";
 
 const DEFAULT_COLOR = "#fff3a3";
@@ -191,6 +191,7 @@ export default class DesktopStickyNotesPlugin extends Plugin {
     this.registerFileLifecycle();
     this.registerContextMenu();
     this.registerGlobalToggleShortcut();
+    this.keepNavigationOutOfStickyWindows();
     this.registerEvent(this.app.workspace.on("active-leaf-change", () => this.scheduleRefreshAllNotes()));
     this.registerEvent(this.app.workspace.on("layout-change", () => this.scheduleRefreshAllNotes()));
   }
@@ -769,13 +770,71 @@ export default class DesktopStickyNotesPlugin extends Plugin {
     const stickyLeaves: WorkspaceLeaf[] = [];
     this.app.workspace.iterateAllLeaves((leaf) => {
       if (!(leaf.view instanceof MarkdownView) || leaf.view.file?.path !== path) return;
-      const document = leaf.view.containerEl.ownerDocument;
-      if (document.documentElement.dataset.desktopStickyNoteWindow === "true"
-        && document.body.classList.contains("desktop-sticky-note")) {
-        stickyLeaves.push(leaf);
-      }
+      if (this.leafIsInStickyWindow(leaf)) stickyLeaves.push(leaf);
     });
     return stickyLeaves;
+  }
+
+  private leafIsInStickyWindow(leaf: WorkspaceLeaf): boolean {
+    const document = leaf.view.containerEl.ownerDocument;
+    return document.documentElement.dataset.desktopStickyNoteWindow === "true"
+      && document.body.classList.contains("desktop-sticky-note");
+  }
+
+  // A sticky note shows one file and is not a place to browse the vault from.
+  // Obsidian, however, answers "which leaf takes this file" from the active
+  // leaf and from the most recently used leaf, and while a sticky note has the
+  // focus both point into its window: a file opened from the quick switcher, a
+  // link, a URI, or the file explorer then replaces the note in the sticky
+  // window. The two answers are taken from the leaves outside sticky windows
+  // instead, so that navigation stays in Obsidian's own windows.
+  //
+  // Obsidian's other ways of picking a leaf (getLeaf, new tab, split) all go
+  // through these two methods, and they are called on the workspace instance,
+  // so replacing them there covers every caller.
+  private keepNavigationOutOfStickyWindows(): void {
+    const { workspace } = this.app;
+    const originalMostRecentLeaf = workspace.getMostRecentLeaf.bind(workspace);
+    const originalUnpinnedLeaf = workspace.getUnpinnedLeaf.bind(workspace);
+
+    const getMostRecentLeaf: Workspace["getMostRecentLeaf"] = (root) => {
+      if (root) return originalMostRecentLeaf(root);
+      // Obsidian's default is the main window and every popout, as an array
+      // of roots. The same array without the sticky windows keeps its choice
+      // among the remaining windows exactly as it would have been.
+      return originalMostRecentLeaf(this.rootsOutsideStickyWindows() as unknown as WorkspaceParent);
+    };
+    const getUnpinnedLeaf: Workspace["getUnpinnedLeaf"] = () => {
+      const active = workspace.getActiveViewOfType(View)?.leaf;
+      if (!active || !this.leafIsInStickyWindow(active)) return originalUnpinnedLeaf();
+      const recent = workspace.getMostRecentLeaf();
+      if (recent && recent.view.navigation && !recent.getViewState().pinned) return recent;
+      // Nothing outside the sticky windows can be navigated, so a new tab is
+      // opened beside the most recent leaf there, which is what Obsidian does
+      // when the active leaf is pinned.
+      return workspace.getLeaf(true);
+    };
+
+    workspace.getMostRecentLeaf = getMostRecentLeaf;
+    workspace.getUnpinnedLeaf = getUnpinnedLeaf;
+    this.register(() => {
+      // Another plugin may have wrapped these since. Its wrapper still calls
+      // through to ours, which needs nothing from the unloaded plugin, so it is
+      // left in place rather than cut out from under that plugin.
+      if (workspace.getMostRecentLeaf === getMostRecentLeaf) workspace.getMostRecentLeaf = originalMostRecentLeaf;
+      if (workspace.getUnpinnedLeaf === getUnpinnedLeaf) workspace.getUnpinnedLeaf = originalUnpinnedLeaf;
+    });
+  }
+
+  private rootsOutsideStickyWindows(): WorkspaceContainer[] {
+    const { workspace } = this.app;
+    // Sidebar leaves report the main window as their container, so the set
+    // holds the main window plus one entry per popout window.
+    const roots = new Set<WorkspaceContainer>([workspace.rootSplit]);
+    workspace.iterateAllLeaves((leaf) => {
+      if (!this.leafIsInStickyWindow(leaf)) roots.add(leaf.getContainer());
+    });
+    return [...roots];
   }
 
   private nativeNoteWindowsForPath(path: string): NativeBrowserWindow[] {
