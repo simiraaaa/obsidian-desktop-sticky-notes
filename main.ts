@@ -19,7 +19,7 @@ function obsidianRemote(): ElectronRemote {
   return remote;
 }
 
-const { BrowserWindow, app: electronApp, globalShortcut, screen } = obsidianRemote();
+const { BrowserWindow, app: electronApp, globalShortcut, screen, systemPreferences } = obsidianRemote();
 
 const DEFAULT_COLOR = "#fff3a3";
 const DEFAULT_WIDTH = 360;
@@ -28,9 +28,9 @@ const WINDOW_NAME_PREFIX = "desktop-sticky-notes:";
 const MIN_WINDOW_OPACITY = 0.2;
 const FULL_WINDOW_OPACITY = 1;
 const WINDOW_OPACITY_STEP = 0.05;
-// macOS's default double-click interval. The system setting cannot be read from
-// a plugin, and this only bounds the double-click that activates a window.
-const ACTIVATION_DOUBLE_CLICK_MS = 500;
+// macOS's double-click interval when the user has never changed it; the
+// setting is only stored once it differs from this default.
+const DEFAULT_DOUBLE_CLICK_MS = 500;
 // How far, in screen points, the second click may land from the first.
 const ACTIVATION_DOUBLE_CLICK_SLOP = 4;
 const LEGACY_DEFAULT_GLOBAL_SHORTCUT = "CommandOrControl+Alt+N";
@@ -43,6 +43,12 @@ const SHUTDOWN_RACE_SLACK_MS = 250;
 const HEADER_MEASURE_ATTEMPTS = 20;
 const HEADER_MEASURE_INTERVAL_MS = 50;
 const FOCUS_SETTLE_MS = 100;
+
+// The double-click interval chosen in the macOS settings, in milliseconds.
+function doubleClickIntervalMs(): number {
+  const seconds = systemPreferences.getUserDefault("com.apple.mouse.doubleClickThreshold", "double");
+  return typeof seconds === "number" && seconds > 0 ? seconds * 1000 : DEFAULT_DOUBLE_CLICK_MS;
+}
 
 type DesktopPlatform = "linux" | "macos" | "windows";
 
@@ -364,6 +370,17 @@ interface StickyNoteWindow {
   // Kept so the listener can be detached again: it lives in the main process
   // and would otherwise outlive both the window and the plugin.
   geometryListener?: () => void;
+}
+
+// A drag of a note window by its header, carried out by the plugin.
+interface HeaderDrag {
+  pointerId: number;
+  header: HTMLElement;
+  startScreenX: number;
+  startScreenY: number;
+  startX: number;
+  startY: number;
+  moved: boolean;
 }
 
 interface NativeBrowserWindow {
@@ -1273,6 +1290,9 @@ export default class DesktopStickyNotesPlugin extends Plugin {
     document.title = nativeTitle;
     window.setTitle(nativeTitle);
     document.body.classList.add("desktop-sticky-note");
+    // Marks the note's own pane, as a popout can hold other panes whose headers
+    // the plugin leaves alone.
+    note.leaf.view.containerEl.classList.add("desktop-sticky-note-view");
     this.applyCollapseClasses(note);
     document.querySelector(".workspace-tab-header-container")?.remove();
     this.applyColor(note, this.noteColor(note.file.path), false);
@@ -1397,7 +1417,10 @@ export default class DesktopStickyNotesPlugin extends Plugin {
   private watchHeaderGestures(note: StickyNoteWindow, domWindow: Window): void {
     if (!Platform.isMacOS) return;
     const { document } = note;
-    let drag: { pointerId: number; header: HTMLElement; startScreenX: number; startScreenY: number; startX: number; startY: number } | null = null;
+    let drag: HeaderDrag | null = null;
+    // Whether the latest press dragged the window. A click that follows another
+    // one quickly and then drags is a move, not the second half of a double-click.
+    let lastPressMoved = false;
     let pendingPosition: [number, number] | null = null;
     let frameRequested = false;
     // The first click of a double-click on an inactive window lands on the native
@@ -1411,6 +1434,13 @@ export default class DesktopStickyNotesPlugin extends Plugin {
     const gestureHeader = (event: Event): HTMLElement | null => {
       if (!this.settings.enableCollapsibleNotes) return null;
       return this.emptyHeaderAt(note, event.target);
+    };
+
+    const endDrag = () => {
+      if (!drag) return;
+      if (drag.header.hasPointerCapture(drag.pointerId)) drag.header.releasePointerCapture(drag.pointerId);
+      lastPressMoved = drag.moved;
+      drag = null;
     };
 
     this.registerDomEvent(domWindow, "focus", (event: FocusEvent) => {
@@ -1428,8 +1458,12 @@ export default class DesktopStickyNotesPlugin extends Plugin {
       if (event.button !== 0 || note.window.isDestroyed()) return;
       const previous = activation;
       activation = null;
+      // The second click comes strictly after the activation. A click stamped
+      // before it is the activating click itself, which reaches the page when
+      // the header was not a drag region yet; on its own it is a single click.
       if (previous
-        && event.timeStamp - previous.at <= ACTIVATION_DOUBLE_CLICK_MS
+        && event.timeStamp > previous.at
+        && event.timeStamp - previous.at <= doubleClickIntervalMs()
         && Math.abs(event.screenX - previous.x) <= ACTIVATION_DOUBLE_CLICK_SLOP
         && Math.abs(event.screenY - previous.y) <= ACTIVATION_DOUBLE_CLICK_SLOP) {
         this.toggleCollapsedFromHeader(note);
@@ -1438,7 +1472,7 @@ export default class DesktopStickyNotesPlugin extends Plugin {
       // Mouse event screen coordinates are screen points, the unit window
       // positions use, independent of the page zoom (measured on macOS).
       const [startX, startY] = note.window.getPosition();
-      drag = { pointerId: event.pointerId, header, startScreenX: event.screenX, startScreenY: event.screenY, startX, startY };
+      drag = { pointerId: event.pointerId, header, startScreenX: event.screenX, startScreenY: event.screenY, startX, startY, moved: false };
       // Captured so that the drag keeps receiving moves when a fast pointer
       // leaves the window before the window catches up with it.
       header.setPointerCapture(event.pointerId);
@@ -1446,10 +1480,11 @@ export default class DesktopStickyNotesPlugin extends Plugin {
 
     this.registerDomEvent(document, "pointermove", (event: PointerEvent) => {
       if (!drag || event.pointerId !== drag.pointerId) return;
-      pendingPosition = [
-        Math.round(drag.startX + event.screenX - drag.startScreenX),
-        Math.round(drag.startY + event.screenY - drag.startScreenY)
-      ];
+      const x = Math.round(drag.startX + event.screenX - drag.startScreenX);
+      const y = Math.round(drag.startY + event.screenY - drag.startScreenY);
+      if (x === drag.startX && y === drag.startY) return;
+      drag.moved = true;
+      pendingPosition = [x, y];
       // Moves arrive faster than the screen refreshes, and each position is a
       // synchronous call into the main process, so only the latest one per
       // frame is applied.
@@ -1463,29 +1498,22 @@ export default class DesktopStickyNotesPlugin extends Plugin {
       });
     }, { capture: true });
 
-    const endDrag = (event: PointerEvent) => {
-      if (!drag || event.pointerId !== drag.pointerId) return;
-      if (drag.header.hasPointerCapture(event.pointerId)) drag.header.releasePointerCapture(event.pointerId);
-      drag = null;
-    };
-    this.registerDomEvent(document, "pointerup", endDrag, { capture: true });
-    this.registerDomEvent(document, "pointercancel", endDrag, { capture: true });
-    this.registerDomEvent(document, "lostpointercapture", endDrag, { capture: true });
+    for (const type of ["pointerup", "pointercancel", "lostpointercapture"] as const) {
+      this.registerDomEvent(document, type, (event: PointerEvent) => {
+        if (drag?.pointerId === event.pointerId) endDrag();
+      }, { capture: true });
+    }
 
-    for (const type of ["mousedown", "mouseup", "click", "auxclick", "dblclick"] as const) {
+    for (const type of ["mousedown", "mouseup", "click", "auxclick", "dblclick", "contextmenu"] as const) {
       this.registerDomEvent(document, type, (event: MouseEvent) => {
         if (!gestureHeader(event)) return;
         event.stopPropagation();
         // Also keeps a press from placing a caret in the editable title.
         event.preventDefault();
-        // Toggled on every second press instead of on dblclick, which fires only
+        // Toggled on every second click instead of on dblclick, which fires only
         // for a click count of exactly two: a double-click that follows another
         // one quickly continues its count at three and four.
-        if (type !== "mousedown" || event.button !== 0 || event.detail < 2 || event.detail % 2 !== 0) return;
-        // The press has already started a drag, which must not move the window
-        // while it changes size.
-        if (drag?.header.hasPointerCapture(drag.pointerId)) drag.header.releasePointerCapture(drag.pointerId);
-        drag = null;
+        if (type !== "click" || event.button !== 0 || event.detail < 2 || event.detail % 2 !== 0 || lastPressMoved) return;
         this.toggleCollapsedFromHeader(note);
       }, { capture: true });
     }
