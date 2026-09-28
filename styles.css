@@ -44,7 +44,7 @@ body.desktop-sticky-note .view-header input {
    itself so that a double-click on the header can toggle the collapse. Inactive
    windows keep the native drag region, the only part of the header that reacts
    to the click activating the window. Obsidian sets is-focused on the body. */
-body.desktop-sticky-note.desktop-sticky-note-collapsible.mod-macos.is-focused .view-header {
+body.desktop-sticky-note.desktop-sticky-note-collapsible.mod-macos.is-focused .desktop-sticky-note-view .view-header {
   -webkit-app-region: no-drag;
 }
 
