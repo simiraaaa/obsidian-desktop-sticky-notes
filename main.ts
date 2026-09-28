@@ -28,6 +28,11 @@ const WINDOW_NAME_PREFIX = "desktop-sticky-notes:";
 const MIN_WINDOW_OPACITY = 0.2;
 const FULL_WINDOW_OPACITY = 1;
 const WINDOW_OPACITY_STEP = 0.05;
+// macOS's default double-click interval. The system setting cannot be read from
+// a plugin, and this only bounds the double-click that activates a window.
+const ACTIVATION_DOUBLE_CLICK_MS = 500;
+// How far, in screen points, the second click may land from the first.
+const ACTIVATION_DOUBLE_CLICK_SLOP = 4;
 const LEGACY_DEFAULT_GLOBAL_SHORTCUT = "CommandOrControl+Alt+N";
 const SETTINGS_SAVE_DEBOUNCE_MS = 500;
 // How far ahead of a shutdown signal a window has to have closed for that
@@ -381,6 +386,7 @@ interface NativeBrowserWindow {
   close(): void;
   destroy(): void;
   getPosition(): [number, number];
+  setPosition(x: number, y: number): void;
   // macOS only: the proxy for a window on another platform does not carry it.
   setWindowButtonVisibility?(visible: boolean): void;
 
@@ -1234,6 +1240,7 @@ export default class DesktopStickyNotesPlugin extends Plugin {
     this.trackNote(note);
     this.prepareWindow(note);
     this.watchWindow(note, domWindow);
+    this.watchHeaderGestures(note, domWindow);
     this.watchWindowGeometry(note);
     this.rememberNoteState(note);
     this.registerDomEvent(domWindow, "beforeunload", () => {
@@ -1377,6 +1384,116 @@ export default class DesktopStickyNotesPlugin extends Plugin {
     }
   }
 
+  // Double-clicking the empty part of a note header toggles the collapse, the
+  // way a double-click on a title bar acts on a window. That part of the header
+  // is a native drag region, which swallows every mouse event before the page
+  // sees it, and a native double-click there zooms the window instead. So while
+  // a window is focused, styles.css turns the header into ordinary page content
+  // and the drag is carried out here. An inactive window keeps the native drag
+  // region: macOS does not pass the click that activates a window on to the
+  // page, so a drag run by the page could not start with that click.
+  // Only macOS is covered: the behavior above was measured there, and under
+  // Wayland a window cannot be moved by setting its position at all.
+  private watchHeaderGestures(note: StickyNoteWindow, domWindow: Window): void {
+    if (!Platform.isMacOS) return;
+    const { document } = note;
+    let drag: { pointerId: number; header: HTMLElement; startScreenX: number; startScreenY: number; startX: number; startY: number } | null = null;
+    let pendingPosition: [number, number] | null = null;
+    let frameRequested = false;
+    // The first click of a double-click on an inactive window lands on the native
+    // drag region and only activates the window; the page never sees it. The
+    // cursor position at that moment is kept so that a second click on the same
+    // spot shortly afterwards can still be recognized as a double-click.
+    let activation: { at: number; x: number; y: number } | null = null;
+
+    const gestureHeader = (event: Event): HTMLElement | null => {
+      if (!this.settings.enableCollapsibleNotes) return null;
+      return this.emptyHeaderAt(note, event.target);
+    };
+
+    this.registerDomEvent(domWindow, "focus", () => {
+      if (!this.settings.enableCollapsibleNotes) return;
+      const cursor = screen.getCursorScreenPoint();
+      activation = { at: performance.now(), x: cursor.x, y: cursor.y };
+    });
+
+    this.registerDomEvent(document, "pointerdown", (event: PointerEvent) => {
+      const header = gestureHeader(event);
+      if (!header) return;
+      // The header keeps the behavior it has as a drag region: nothing inside
+      // it, such as the editable title, reacts to a press that lands there.
+      event.stopPropagation();
+      if (event.button !== 0 || note.window.isDestroyed()) return;
+      const previous = activation;
+      activation = null;
+      if (previous
+        && performance.now() - previous.at <= ACTIVATION_DOUBLE_CLICK_MS
+        && Math.abs(event.screenX - previous.x) <= ACTIVATION_DOUBLE_CLICK_SLOP
+        && Math.abs(event.screenY - previous.y) <= ACTIVATION_DOUBLE_CLICK_SLOP) {
+        this.toggleCollapsedFromHeader(note);
+        return;
+      }
+      // Mouse event screen coordinates are screen points, the unit window
+      // positions use, independent of the page zoom (measured on macOS).
+      const [startX, startY] = note.window.getPosition();
+      drag = { pointerId: event.pointerId, header, startScreenX: event.screenX, startScreenY: event.screenY, startX, startY };
+      // Captured so that the drag keeps receiving moves when a fast pointer
+      // leaves the window before the window catches up with it.
+      header.setPointerCapture(event.pointerId);
+    }, { capture: true });
+
+    this.registerDomEvent(document, "pointermove", (event: PointerEvent) => {
+      if (!drag || event.pointerId !== drag.pointerId) return;
+      pendingPosition = [
+        Math.round(drag.startX + event.screenX - drag.startScreenX),
+        Math.round(drag.startY + event.screenY - drag.startScreenY)
+      ];
+      // Moves arrive faster than the screen refreshes, and each position is a
+      // synchronous call into the main process, so only the latest one per
+      // frame is applied.
+      if (frameRequested) return;
+      frameRequested = true;
+      domWindow.requestAnimationFrame(() => {
+        frameRequested = false;
+        if (!pendingPosition || note.window.isDestroyed()) return;
+        note.window.setPosition(...pendingPosition);
+        pendingPosition = null;
+      });
+    }, { capture: true });
+
+    const endDrag = (event: PointerEvent) => {
+      if (!drag || event.pointerId !== drag.pointerId) return;
+      if (drag.header.hasPointerCapture(event.pointerId)) drag.header.releasePointerCapture(event.pointerId);
+      drag = null;
+    };
+    this.registerDomEvent(document, "pointerup", endDrag, { capture: true });
+    this.registerDomEvent(document, "pointercancel", endDrag, { capture: true });
+    this.registerDomEvent(document, "lostpointercapture", endDrag, { capture: true });
+
+    for (const type of ["mousedown", "mouseup", "click", "auxclick", "dblclick"] as const) {
+      this.registerDomEvent(document, type, (event: MouseEvent) => {
+        if (!gestureHeader(event)) return;
+        event.stopPropagation();
+        // Also keeps a press from placing a caret in the editable title.
+        event.preventDefault();
+        if (type === "dblclick" && event.button === 0) this.toggleCollapsedFromHeader(note);
+      }, { capture: true });
+    }
+  }
+
+  // The part of this note's header that acts as a title bar: everything except
+  // its controls. Returns that header, or null for any other target.
+  private emptyHeaderAt(note: StickyNoteWindow, target: EventTarget | null): HTMLElement | null {
+    // Elements of a popout belong to that window's own Element class.
+    const domWindow = note.document.defaultView;
+    if (!domWindow || !(target instanceof domWindow.Element)) return null;
+    const header = target.closest<HTMLElement>(".view-header");
+    // Scoped to this note's own view, as a popout can hold other panes.
+    if (!header || !note.leaf.view.containerEl.contains(header)) return null;
+    if (target.closest("button, input, select, textarea, a, .clickable-icon, .view-actions")) return null;
+    return header;
+  }
+
   private scheduleRefreshNote(note: StickyNoteWindow): void {
     // Obsidian performs some focus/layout work after its events fire, so run
     // once immediately and once after that update has settled.
@@ -1456,10 +1573,7 @@ export default class DesktopStickyNotesPlugin extends Plugin {
     actions.empty();
 
     if (this.settings.enableCollapsibleNotes) {
-      const collapse = view.addAction("chevron-down", "Collapse sticky note", () => {
-        this.toggleCollapsed(note);
-        this.updateCollapseButton(collapse, note.isCollapsed);
-      });
+      const collapse = view.addAction("chevron-down", "Collapse sticky note", () => this.toggleCollapsedFromHeader(note));
       collapse.addClass("desktop-sticky-note-collapse");
       // A rebuilt bar starts from the tracked state, like the in-place update.
       this.updateCollapseButton(collapse, note.isCollapsed);
@@ -1503,6 +1617,14 @@ export default class DesktopStickyNotesPlugin extends Plugin {
     } else {
       this.collapseNote(note);
     }
+  }
+
+  // Toggles from the header, by its button or a double-click, and keeps the
+  // button showing the resulting state.
+  private toggleCollapsedFromHeader(note: StickyNoteWindow): void {
+    this.toggleCollapsed(note);
+    const collapse = note.leaf.view.containerEl.querySelector<HTMLElement>(".view-actions .desktop-sticky-note-collapse");
+    if (collapse) this.updateCollapseButton(collapse, note.isCollapsed);
   }
 
   private collapseNote(note: StickyNoteWindow): void {
