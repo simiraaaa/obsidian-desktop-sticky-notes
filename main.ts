@@ -178,6 +178,9 @@ interface StickyNoteWindow {
   // to know whether a window is collapsed and how tall it was before.
   isCollapsed: boolean;
   expandedSize?: { width: number; height: number };
+  // Set while an expanded window must not be resizable so that a native
+  // double-click cannot zoom it; see watchHeaderGestures().
+  zoomGuarded?: boolean;
 }
 
 // A drag of a note window by its header, carried out by the plugin.
@@ -614,7 +617,7 @@ export default class DesktopStickyNotesPlugin extends Plugin {
     if (note.isCollapsed && this.settings.enableCollapsibleNotes) {
       this.syncCollapsedHeight(note);
     } else {
-      window.setResizable(true);
+      this.applyExpandedResizable(note);
     }
     this.addStickyActions(note);
     this.observePresentation(note);
@@ -665,7 +668,31 @@ export default class DesktopStickyNotesPlugin extends Plugin {
       drag = null;
     };
 
+    // The native double-click that zooms a window still reaches an inactive
+    // window, whose header is a drag region, and the window it activates when
+    // the second click arrives before the header has stopped being one. A
+    // window that cannot be resized does not zoom (measured on a collapsed
+    // note), so an expanded window stays fixed in size while it is inactive
+    // and for one double-click interval after it gains the focus. setMaximizable
+    // does not prevent the zoom (measured). Each focus change supersedes the
+    // pending release of the one before it.
+    let focusChange = 0;
+    const setZoomGuard = (guarded: boolean) => {
+      note.zoomGuarded = guarded;
+      if (!note.isCollapsed && !note.window.isDestroyed()) this.applyExpandedResizable(note);
+    };
+    setZoomGuard(!note.window.isFocused());
+
+    this.registerDomEvent(domWindow, "blur", () => {
+      focusChange++;
+      setZoomGuard(true);
+    });
+
     this.registerDomEvent(domWindow, "focus", (event: FocusEvent) => {
+      const change = ++focusChange;
+      window.setTimeout(() => {
+        if (change === focusChange && !note.window.isDestroyed()) setZoomGuard(false);
+      }, doubleClickIntervalMs());
       if (!this.settings.enableCollapsibleNotes) return;
       const cursor = screen.getCursorScreenPoint();
       activation = { at: event.timeStamp, x: cursor.x, y: cursor.y };
@@ -911,7 +938,9 @@ export default class DesktopStickyNotesPlugin extends Plugin {
       return;
     }
     // Resize first: a non-resizable window ignores size changes on some
-    // platforms, so the window must still be resizable while it shrinks.
+    // platforms, so the window must still be resizable while it shrinks. It
+    // may not be yet when the zoom guard holds it.
+    window.setResizable(true);
     window.setContentSize(width, collapsedHeight);
     // Programmatic resizing is not honored everywhere, notably under native
     // Wayland, so the new size is read back before the note is committed to a
@@ -922,6 +951,7 @@ export default class DesktopStickyNotesPlugin extends Plugin {
       // harmless where the resize was ignored outright.
       window.setContentSize(width, height);
       this.abandonCollapse(note);
+      this.applyExpandedResizable(note);
       return;
     }
     // A collapsed window must not be dragged to a new height, which would
@@ -954,6 +984,14 @@ export default class DesktopStickyNotesPlugin extends Plugin {
     this.applyCollapseClasses(note);
     window.setResizable(true);
     window.setContentSize(width, height);
+    this.applyExpandedResizable(note);
+  }
+
+  private applyExpandedResizable(note: StickyNoteWindow): void {
+    // An expanded window is resizable unless the zoom guard holds it, which
+    // only matters while double-clicking the header toggles the collapse.
+    const guarded = Platform.isMacOS && this.settings.enableCollapsibleNotes && note.zoomGuarded === true;
+    note.window.setResizable(!guarded);
   }
 
   private applyCollapseClasses(note: StickyNoteWindow): void {
