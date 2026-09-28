@@ -7,6 +7,9 @@ const DEFAULT_WIDTH = 360;
 const DEFAULT_HEIGHT = 360;
 const WINDOW_NAME_PREFIX = "desktop-sticky-notes:";
 const LEGACY_DEFAULT_GLOBAL_SHORTCUT = "CommandOrControl+Alt+N";
+// How far, in screen points, the pointer has to move before pressing a note
+// header drags the window.
+const HEADER_DRAG_THRESHOLD = 3;
 
 type DesktopPlatform = "linux" | "macos" | "windows";
 
@@ -620,11 +623,9 @@ export default class DesktopStickyNotesPlugin extends Plugin {
   // that part of the header would swallow every mouse event before the page
   // sees it, and a native double-click there zooms the window instead. So while
   // the feature is on, styles.css turns the header into ordinary page content
-  // and the drag is carried out here. That holds for inactive windows too:
-  // their header only turned into page content once they gained the focus,
-  // which came too late for the second click of a double-click on an inactive
-  // window, and the click that activates a window does reach the page outside
-  // a drag region (both measured on macOS).
+  // and the drag is carried out here. Inactive windows are handled the same
+  // way, since the click that activates a window reaches the page outside a
+  // drag region (measured on macOS).
   // Only macOS is covered: the behavior above was measured there, and under
   // Wayland a window cannot be moved by setting its position at all.
   private watchHeaderGestures(note: StickyNoteWindow, domWindow: Window): void {
@@ -652,7 +653,7 @@ export default class DesktopStickyNotesPlugin extends Plugin {
     this.registerDomEvent(document, "pointerdown", (event: PointerEvent) => {
       const header = gestureHeader(event);
       if (!header) return;
-      // The header keeps the behavior it has as a drag region: nothing inside
+      // The header keeps the behavior it had as a drag region: nothing inside
       // it, such as the editable title, reacts to a press that lands there.
       event.stopPropagation();
       if (event.button !== 0 || note.window.isDestroyed()) return;
@@ -667,10 +668,14 @@ export default class DesktopStickyNotesPlugin extends Plugin {
 
     this.registerDomEvent(document, "pointermove", (event: PointerEvent) => {
       if (!drag || event.pointerId !== drag.pointerId) return;
-      const x = Math.round(drag.startX + event.screenX - drag.startScreenX);
-      const y = Math.round(drag.startY + event.screenY - drag.startScreenY);
-      if (x === drag.startX && y === drag.startY) return;
+      const dx = event.screenX - drag.startScreenX;
+      const dy = event.screenY - drag.startScreenY;
+      // A hand that shifts slightly during a double-click must neither nudge
+      // the window nor turn the second click into a drag, as on a title bar.
+      if (!drag.moved && Math.abs(dx) < HEADER_DRAG_THRESHOLD && Math.abs(dy) < HEADER_DRAG_THRESHOLD) return;
       drag.moved = true;
+      const x = Math.round(drag.startX + dx);
+      const y = Math.round(drag.startY + dy);
       pendingPosition = [x, y];
       // Moves arrive faster than the screen refreshes, and each position is a
       // synchronous call into the main process, so only the latest one per
