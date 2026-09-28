@@ -1478,7 +1478,15 @@ export default class DesktopStickyNotesPlugin extends Plugin {
         event.stopPropagation();
         // Also keeps a press from placing a caret in the editable title.
         event.preventDefault();
-        if (type === "dblclick" && event.button === 0) this.toggleCollapsedFromHeader(note);
+        // Toggled on every second press instead of on dblclick, which fires only
+        // for a click count of exactly two: a double-click that follows another
+        // one quickly continues its count at three and four.
+        if (type !== "mousedown" || event.button !== 0 || event.detail < 2 || event.detail % 2 !== 0) return;
+        // The press has already started a drag, which must not move the window
+        // while it changes size.
+        if (drag?.header.hasPointerCapture(drag.pointerId)) drag.header.releasePointerCapture(drag.pointerId);
+        drag = null;
+        this.toggleCollapsedFromHeader(note);
       }, { capture: true });
     }
   }
