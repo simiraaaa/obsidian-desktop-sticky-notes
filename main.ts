@@ -1484,13 +1484,14 @@ export default class DesktopStickyNotesPlugin extends Plugin {
   // The part of this note's header that acts as a title bar: everything except
   // its controls. Returns that header, or null for any other target.
   private emptyHeaderAt(note: StickyNoteWindow, target: EventTarget | null): HTMLElement | null {
-    // Elements of a popout belong to that window's own Element class.
-    const domWindow = note.document.defaultView;
-    if (!domWindow || !(target instanceof domWindow.Element)) return null;
-    const header = target.closest<HTMLElement>(".view-header");
+    // Obsidian builds popout elements from the main window, so neither window's
+    // Element class matches reliably; Obsidian's instanceOf() checks across both.
+    const node = target as Node | null;
+    if (!node?.instanceOf(Element)) return null;
+    const header = node.closest<HTMLElement>(".view-header");
     // Scoped to this note's own view, as a popout can hold other panes.
     if (!header || !note.leaf.view.containerEl.contains(header)) return null;
-    if (target.closest("button, input, select, textarea, a, .clickable-icon, .view-actions")) return null;
+    if (node.closest("button, input, select, textarea, a, .clickable-icon, .view-actions")) return null;
     return header;
   }
 
