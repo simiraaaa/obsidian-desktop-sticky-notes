@@ -184,6 +184,7 @@ interface StickyNoteSettings {
   defaultFolder: string;
   defaultNoteColor: string;
   windowOpacity: number;
+  // Also covers hovering; the stored name predates that.
   opaqueWhileFocused: boolean;
 
   headerSize: HeaderSize;
@@ -348,8 +349,8 @@ interface StickyNoteWindow {
   window: NativeBrowserWindow;
   observer?: MutationObserver;
   // Opacity last applied to the native window, whether the setting or full
-  // opacity for the focused window, so that the refresh passes can skip the
-  // remote call while the target is unchanged.
+  // opacity for a focused or hovered window, so that repeated passes can skip
+  // the remote call while the target is unchanged.
   appliedOpacity?: number;
 
   trafficLightsHidden?: boolean;
@@ -1269,12 +1270,18 @@ export default class DesktopStickyNotesPlugin extends Plugin {
     return note;
   }
 
+  // Whether the plugin still owns the note's window: not after unloading, and
+  // not once the note was untracked for closing or its window is gone.
+  private noteIsLive(note: StickyNoteWindow): boolean {
+    return !this.unloaded && !!this.notesByPath.get(note.file.path)?.has(note) && !note.window.isDestroyed();
+  }
+
   private prepareWindow(note: StickyNoteWindow): void {
     // scheduleRefreshNote() uses plain timeouts, which outlive the plugin and
     // the note. A pass that runs after unload, or after the note was untracked
     // for closing, would decorate a window the plugin no longer owns and undo
     // the opacity that was restored on the way out.
-    if (this.unloaded || !this.notesByPath.get(note.file.path)?.has(note) || note.window.isDestroyed()) return;
+    if (!this.noteIsLive(note)) return;
     const { document, window } = note;
     const nativeTitle = this.nativeNoteWindowTitle(note.file);
     const domWindow = document.defaultView;
@@ -1359,9 +1366,12 @@ export default class DesktopStickyNotesPlugin extends Plugin {
     // Inactive windows report the pointer entering and leaving as well
     // (measured on macOS). A native drag region does not, so the pointer only
     // counts once it is over the rest of the window.
+    // Guarded like the refresh passes: a pointer leaving a window that is
+    // being closed must not make it translucent again after its opacity was
+    // restored on the way out.
     const hover = (hovered: boolean) => {
       note.isHovered = hovered;
-      this.applyWindowOpacity(note);
+      if (this.noteIsLive(note)) this.applyWindowOpacity(note);
     };
     this.registerDomEvent(note.document.documentElement, "mouseenter", () => hover(true));
     this.registerDomEvent(note.document.documentElement, "mouseleave", () => hover(false));
@@ -1910,8 +1920,9 @@ export default class DesktopStickyNotesPlugin extends Plugin {
     void this.saveSettings();
   }
 
-  // The focus and blur passes call this, so a window that has the focus is
-  // brought to full opacity and back as the focus moves.
+  // Called on focus changes, on the pointer entering or leaving, and on setting
+  // changes, so a focused or hovered window is brought to full opacity and
+  // back as those change.
   private applyWindowOpacity(note: StickyNoteWindow): void {
     const opacity = this.targetWindowOpacity(note);
     if (note.appliedOpacity === opacity) return;
@@ -1943,6 +1954,7 @@ export default class DesktopStickyNotesPlugin extends Plugin {
     // The document's own focus state is what the focus and blur events that
     // trigger this describe, so it agrees with them. The native window's state
     // is a synchronous call into the main process and can lag those events.
+    // Hovering is tracked from the pointer entering and leaving the document.
     return note.document.hasFocus() || note.isHovered ? FULL_WINDOW_OPACITY : windowOpacity;
   }
 
@@ -2398,7 +2410,7 @@ class DesktopStickyNotesSettingTab extends PluginSettingTab {
       },
       {
         name: "Opaque while focused or hovered",
-        desc: "Keep a sticky note fully opaque while its window has the focus or the pointer is over it, so that it stays easy to read while you work in it. Applies only when window opacity is below 100%.",
+        desc: "Keep a sticky note fully opaque while its window has the focus or the pointer is over it, so that it stays easy to read while you work in it or look at it. Applies only when window opacity is below 100%.",
         render: (setting) => this.addOpaqueWhileFocusedControl(setting)
       },
       {
@@ -2444,7 +2456,7 @@ class DesktopStickyNotesSettingTab extends PluginSettingTab {
       .setDesc("Opacity of every sticky-note window. Fully opaque by default."));
     this.addOpaqueWhileFocusedControl(new Setting(containerEl)
       .setName("Opaque while focused or hovered")
-      .setDesc("Keep a sticky note fully opaque while its window has the focus or the pointer is over it, so that it stays easy to read while you work in it. Applies only when window opacity is below 100%."));
+      .setDesc("Keep a sticky note fully opaque while its window has the focus or the pointer is over it, so that it stays easy to read while you work in it or look at it. Applies only when window opacity is below 100%."));
 
     this.addHeaderSizeControl(new Setting(containerEl)
       .setName("Header size")
