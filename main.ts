@@ -175,6 +175,8 @@ interface StickyNoteWindow {
   // opacity for the focused window, so that the refresh passes can skip the
   // remote call while the target is unchanged.
   appliedOpacity?: number;
+  // Whether the pointer is over the window, which keeps it opaque like the focus.
+  isHovered?: boolean;
 }
 
 interface NativeBrowserWindow {
@@ -603,6 +605,15 @@ export default class DesktopStickyNotesPlugin extends Plugin {
     const restore = () => this.scheduleRefreshNote(note);
     this.registerDomEvent(domWindow, "focus", restore);
     this.registerDomEvent(domWindow, "blur", restore);
+    // Inactive windows report the pointer entering and leaving as well
+    // (measured on macOS). A native drag region does not, so the pointer only
+    // counts once it is over the rest of the window.
+    const hover = (hovered: boolean) => {
+      note.isHovered = hovered;
+      this.applyWindowOpacity(note);
+    };
+    this.registerDomEvent(note.document.documentElement, "mouseenter", () => hover(true));
+    this.registerDomEvent(note.document.documentElement, "mouseleave", () => hover(false));
   }
 
   private scheduleRefreshNote(note: StickyNoteWindow): void {
@@ -810,7 +821,7 @@ export default class DesktopStickyNotesPlugin extends Plugin {
     // The document's own focus state is what the focus and blur events that
     // trigger this describe, so it agrees with them. The native window's state
     // is a synchronous call into the main process and can lag those events.
-    return note.document.hasFocus() ? FULL_WINDOW_OPACITY : windowOpacity;
+    return note.document.hasFocus() || note.isHovered ? FULL_WINDOW_OPACITY : windowOpacity;
   }
 
   private setNativeOpacity(nativeWindow: NativeBrowserWindow, opacity: number): void {
@@ -994,8 +1005,8 @@ class DesktopStickyNotesSettingTab extends PluginSettingTab {
         render: (setting) => this.addWindowOpacityControl(setting)
       },
       {
-        name: "Opaque while focused",
-        desc: "Keep a sticky note fully opaque while its window has the focus, so that it stays easy to read while you work in it. Applies only when window opacity is below 100%.",
+        name: "Opaque while focused or hovered",
+        desc: "Keep a sticky note fully opaque while its window has the focus or the pointer is over it, so that it stays easy to read while you work in it. Applies only when window opacity is below 100%.",
         render: (setting) => this.addOpaqueWhileFocusedControl(setting)
       },
       {
@@ -1025,8 +1036,8 @@ class DesktopStickyNotesSettingTab extends PluginSettingTab {
       .setName("Window opacity")
       .setDesc("Opacity of every sticky-note window. Fully opaque by default."));
     this.addOpaqueWhileFocusedControl(new Setting(containerEl)
-      .setName("Opaque while focused")
-      .setDesc("Keep a sticky note fully opaque while its window has the focus, so that it stays easy to read while you work in it. Applies only when window opacity is below 100%."));
+      .setName("Opaque while focused or hovered")
+      .setDesc("Keep a sticky note fully opaque while its window has the focus or the pointer is over it, so that it stays easy to read while you work in it. Applies only when window opacity is below 100%."));
     this.addGlobalShortcutControl(new Setting(containerEl)
       .setName("Global toggle shortcut")
       .setDesc("System-wide shortcut for toggling the top-level sticky note. Click the shortcut, press a new combination, or press escape to cancel."));
