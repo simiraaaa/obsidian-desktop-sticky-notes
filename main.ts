@@ -1,16 +1,11 @@
 import { MarkdownView, Notice, Platform, Plugin, PluginSettingTab, Setting, TAbstractFile, TFile, WorkspaceLeaf, normalizePath, setIcon, setTooltip } from "obsidian";
 import type { SettingDefinitionItem } from "obsidian";
-import { BrowserWindow, app as electronApp, globalShortcut, screen, systemPreferences } from "@electron/remote";
+import { BrowserWindow, app as electronApp, globalShortcut, screen } from "@electron/remote";
 
 const DEFAULT_COLOR = "#fff3a3";
 const DEFAULT_WIDTH = 360;
 const DEFAULT_HEIGHT = 360;
 const WINDOW_NAME_PREFIX = "desktop-sticky-notes:";
-// macOS's double-click interval when the user has never changed it; the
-// setting is only stored once it differs from this default.
-const DEFAULT_DOUBLE_CLICK_MS = 500;
-// How far, in screen points, the second click may land from the first.
-const ACTIVATION_DOUBLE_CLICK_SLOP = 4;
 const LEGACY_DEFAULT_GLOBAL_SHORTCUT = "CommandOrControl+Alt+N";
 const SETTINGS_SAVE_DEBOUNCE_MS = 500;
 // How far ahead of a shutdown signal a window has to have closed for that
@@ -21,12 +16,6 @@ const SHUTDOWN_RACE_SLACK_MS = 250;
 const HEADER_MEASURE_ATTEMPTS = 20;
 const HEADER_MEASURE_INTERVAL_MS = 50;
 const FOCUS_SETTLE_MS = 100;
-
-// The double-click interval chosen in the macOS settings, in milliseconds.
-function doubleClickIntervalMs(): number {
-  const seconds = systemPreferences.getUserDefault("com.apple.mouse.doubleClickThreshold", "double");
-  return typeof seconds === "number" && seconds > 0 ? seconds * 1000 : DEFAULT_DOUBLE_CLICK_MS;
-}
 
 type DesktopPlatform = "linux" | "macos" | "windows";
 
@@ -301,9 +290,6 @@ interface StickyNoteWindow {
   // Kept so the listener can be detached again: it lives in the main process
   // and would otherwise outlive both the window and the plugin.
   geometryListener?: () => void;
-  // Set while an expanded window must not be resizable so that a native
-  // double-click cannot zoom it; see watchHeaderGestures().
-  zoomGuarded?: boolean;
 }
 
 // A drag of a note window by its header, carried out by the plugin.
@@ -1180,7 +1166,7 @@ export default class DesktopStickyNotesPlugin extends Plugin {
     if (note.isCollapsed && this.settings.enableCollapsibleNotes) {
       this.syncCollapsedHeight(note);
     } else {
-      this.applyExpandedResizable(note);
+      window.setResizable(true);
     }
     this.addStickyActions(note);
     this.observePresentation(note);
@@ -1234,13 +1220,15 @@ export default class DesktopStickyNotesPlugin extends Plugin {
   }
 
   // Double-clicking the empty part of a note header toggles the collapse, the
-  // way a double-click on a title bar acts on a window. That part of the header
-  // is a native drag region, which swallows every mouse event before the page
+  // way a double-click on a title bar acts on a window. As a native drag region
+  // that part of the header would swallow every mouse event before the page
   // sees it, and a native double-click there zooms the window instead. So while
-  // a window is focused, styles.css turns the header into ordinary page content
-  // and the drag is carried out here. An inactive window keeps the native drag
-  // region: macOS does not pass the click that activates a window on to the
-  // page, so a drag run by the page could not start with that click.
+  // the feature is on, styles.css turns the header into ordinary page content
+  // and the drag is carried out here. That holds for inactive windows too:
+  // their header only turned into page content once they gained the focus,
+  // which came too late for the second click of a double-click on an inactive
+  // window, and the click that activates a window does reach the page outside
+  // a drag region (both measured on macOS).
   // Only macOS is covered: the behavior above was measured there, and under
   // Wayland a window cannot be moved by setting its position at all.
   private watchHeaderGestures(note: StickyNoteWindow, domWindow: Window): void {
@@ -1252,13 +1240,6 @@ export default class DesktopStickyNotesPlugin extends Plugin {
     let lastPressMoved = false;
     let pendingPosition: [number, number] | null = null;
     let frameRequested = false;
-    // The first click of a double-click on an inactive window lands on the native
-    // drag region and only activates the window; the page never sees it. The
-    // cursor position at that moment is kept so that a second click on the same
-    // spot shortly afterwards can still be recognized as a double-click. Times
-    // are event timestamps rather than handler times: activating a window keeps
-    // its main thread busy, which delays the handlers but not the timestamps.
-    let activation: { at: number; x: number; y: number } | null = null;
 
     const gestureHeader = (event: Event): HTMLElement | null => {
       if (!this.settings.enableCollapsibleNotes) return null;
@@ -1272,36 +1253,6 @@ export default class DesktopStickyNotesPlugin extends Plugin {
       drag = null;
     };
 
-    // The native double-click that zooms a window still reaches an inactive
-    // window, whose header is a drag region, and the window it activates when
-    // the second click arrives before the header has stopped being one. A
-    // window that cannot be resized does not zoom (measured on a collapsed
-    // note), so an expanded window stays fixed in size while it is inactive
-    // and for one double-click interval after it gains the focus. setMaximizable
-    // does not prevent the zoom (measured). Each focus change supersedes the
-    // pending release of the one before it.
-    let focusChange = 0;
-    const setZoomGuard = (guarded: boolean) => {
-      note.zoomGuarded = guarded;
-      if (!note.isCollapsed && !note.window.isDestroyed()) this.applyExpandedResizable(note);
-    };
-    setZoomGuard(!note.window.isFocused());
-
-    this.registerDomEvent(domWindow, "blur", () => {
-      focusChange++;
-      setZoomGuard(true);
-    });
-
-    this.registerDomEvent(domWindow, "focus", (event: FocusEvent) => {
-      const change = ++focusChange;
-      window.setTimeout(() => {
-        if (change === focusChange && !note.window.isDestroyed()) setZoomGuard(false);
-      }, doubleClickIntervalMs());
-      if (!this.settings.enableCollapsibleNotes) return;
-      const cursor = screen.getCursorScreenPoint();
-      activation = { at: event.timeStamp, x: cursor.x, y: cursor.y };
-    });
-
     this.registerDomEvent(document, "pointerdown", (event: PointerEvent) => {
       const header = gestureHeader(event);
       if (!header) return;
@@ -1309,19 +1260,6 @@ export default class DesktopStickyNotesPlugin extends Plugin {
       // it, such as the editable title, reacts to a press that lands there.
       event.stopPropagation();
       if (event.button !== 0 || note.window.isDestroyed()) return;
-      const previous = activation;
-      activation = null;
-      // The second click comes strictly after the activation. A click stamped
-      // before it is the activating click itself, which reaches the page when
-      // the header was not a drag region yet; on its own it is a single click.
-      if (previous
-        && event.timeStamp > previous.at
-        && event.timeStamp - previous.at <= doubleClickIntervalMs()
-        && Math.abs(event.screenX - previous.x) <= ACTIVATION_DOUBLE_CLICK_SLOP
-        && Math.abs(event.screenY - previous.y) <= ACTIVATION_DOUBLE_CLICK_SLOP) {
-        this.toggleCollapsedFromHeader(note);
-        return;
-      }
       // Mouse event screen coordinates are screen points, the unit window
       // positions use, independent of the page zoom (measured on macOS).
       const [startX, startY] = note.window.getPosition();
@@ -1540,9 +1478,7 @@ export default class DesktopStickyNotesPlugin extends Plugin {
       return;
     }
     // Resize first: a non-resizable window ignores size changes on some
-    // platforms, so the window must still be resizable while it shrinks. It
-    // may not be yet when the zoom guard holds it.
-    window.setResizable(true);
+    // platforms, so the window must still be resizable while it shrinks.
     window.setContentSize(width, collapsedHeight);
     // Programmatic resizing is not honored everywhere, notably under native
     // Wayland, so the new size is read back before the note is committed to a
@@ -1553,7 +1489,6 @@ export default class DesktopStickyNotesPlugin extends Plugin {
       // harmless where the resize was ignored outright.
       window.setContentSize(width, height);
       this.abandonCollapse(note);
-      this.applyExpandedResizable(note);
       return;
     }
     // A collapsed window must not be dragged to a new height, which would
@@ -1587,17 +1522,9 @@ export default class DesktopStickyNotesPlugin extends Plugin {
     this.applyCollapseClasses(note);
     window.setResizable(true);
     window.setContentSize(width, height);
-    this.applyExpandedResizable(note);
     // Recorded from here rather than from the collapse button, so that
     // expanding every note when the feature is switched off is recorded too.
     this.rememberNoteState(note);
-  }
-
-  private applyExpandedResizable(note: StickyNoteWindow): void {
-    // An expanded window is resizable unless the zoom guard holds it, which
-    // only matters while double-clicking the header toggles the collapse.
-    const guarded = Platform.isMacOS && this.settings.enableCollapsibleNotes && note.zoomGuarded === true;
-    note.window.setResizable(!guarded);
   }
 
   private applyCollapseClasses(note: StickyNoteWindow): void {
