@@ -1403,7 +1403,9 @@ export default class DesktopStickyNotesPlugin extends Plugin {
     // The first click of a double-click on an inactive window lands on the native
     // drag region and only activates the window; the page never sees it. The
     // cursor position at that moment is kept so that a second click on the same
-    // spot shortly afterwards can still be recognized as a double-click.
+    // spot shortly afterwards can still be recognized as a double-click. Times
+    // are event timestamps rather than handler times: activating a window keeps
+    // its main thread busy, which delays the handlers but not the timestamps.
     let activation: { at: number; x: number; y: number } | null = null;
 
     const gestureHeader = (event: Event): HTMLElement | null => {
@@ -1411,10 +1413,10 @@ export default class DesktopStickyNotesPlugin extends Plugin {
       return this.emptyHeaderAt(note, event.target);
     };
 
-    this.registerDomEvent(domWindow, "focus", () => {
+    this.registerDomEvent(domWindow, "focus", (event: FocusEvent) => {
       if (!this.settings.enableCollapsibleNotes) return;
       const cursor = screen.getCursorScreenPoint();
-      activation = { at: performance.now(), x: cursor.x, y: cursor.y };
+      activation = { at: event.timeStamp, x: cursor.x, y: cursor.y };
     });
 
     this.registerDomEvent(document, "pointerdown", (event: PointerEvent) => {
@@ -1427,7 +1429,7 @@ export default class DesktopStickyNotesPlugin extends Plugin {
       const previous = activation;
       activation = null;
       if (previous
-        && performance.now() - previous.at <= ACTIVATION_DOUBLE_CLICK_MS
+        && event.timeStamp - previous.at <= ACTIVATION_DOUBLE_CLICK_MS
         && Math.abs(event.screenX - previous.x) <= ACTIVATION_DOUBLE_CLICK_SLOP
         && Math.abs(event.screenY - previous.y) <= ACTIVATION_DOUBLE_CLICK_SLOP) {
         this.toggleCollapsedFromHeader(note);
