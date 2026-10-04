@@ -99,6 +99,7 @@ function createHarness(settings = {}, layoutReady = false, supportsDeferredViews
   const readyCallbacks = [];
   const shortcuts = new Map();
   let nextTimer = 0;
+  let clockTime = 0;
   let nextLeaf = 0;
   let stored = structuredClone(settings);
 
@@ -123,10 +124,24 @@ function createHarness(settings = {}, layoutReady = false, supportsDeferredViews
     openPopoutLeaf() { this.popoutsOpened++; return addLeaf(`new-${++nextLeaf}`); }
   });
 
-  function addLeaf(id, { file = new TFile("Notes/Example.md"), popout = true, deferred = false, native = true } = {}) {
+  function addLeaf(id, { file = new TFile("Notes/Example.md"), popout = true, deferred = false, native = true, asyncTitle = false } = {}) {
     const document = popout ? createDocument() : mainDocument;
+    let nativeTitle = document.title;
+    if (asyncTitle) {
+      // DOM title changes travel to Electron on a later turn. Keeping these
+      // values separate exposes lookups that only work with synchronous IPC.
+      let domTitle = document.title;
+      Object.defineProperty(document, "title", {
+        get: () => domTitle,
+        set(title) {
+          domTitle = title;
+          timers.set(++nextTimer, { callback: () => { nativeTitle = title; }, at: clockTime });
+        }
+      });
+    }
     const view = new MarkdownView(file, document);
     const container = popout ? new WorkspaceWindow() : {};
+    if (popout) Object.assign(container, { doc: document, win: document.defaultView });
     let resolveLoad;
     const leaf = {
       id, popout, document, container,
@@ -135,7 +150,7 @@ function createHarness(settings = {}, layoutReady = false, supportsDeferredViews
       loadCalls: 0,
       detaches: 0,
       getContainer() { return this.container; },
-      getViewState() { return { type: this.isDeferred || this.view instanceof MarkdownView ? "markdown" : "other" }; },
+      getViewState() { return { type: this.isDeferred || this.view instanceof MarkdownView ? "markdown" : "other", state: { file: view.file.path } }; },
       async openFile(opened, { active = false } = {}) {
         this.view.file = opened;
         files.set(opened.path, opened);
@@ -161,13 +176,15 @@ function createHarness(settings = {}, layoutReady = false, supportsDeferredViews
       destroyed: false, closes: 0, destroys: 0, focused: false, alwaysOnTop: false,
       setResizable() {}, setParentWindow(parent) { this.parent = parent; }, setSkipTaskbar() {},
       setAlwaysOnTop(value) { this.alwaysOnTop = value; }, isAlwaysOnTop() { return this.alwaysOnTop; },
-      setTitle(title) { document.title = title; }, getTitle() { return document.title; },
+      setTitle(title) { nativeTitle = title; document.title = title; },
+      getTitle() { return asyncTitle ? nativeTitle : document.title; },
       isDestroyed() { return this.destroyed; }, isFocused() { return this.focused; },
       isVisible() { return true; }, isMinimized() { return false; },
       show() {}, restore() {}, focus() { this.focused = true; }, moveTop() {},
       close() {
         this.closes++;
         document.defaultView.dispatchEvent(new Event("beforeunload"));
+        document.defaultView.closed = true;
         this.destroyed = true;
         leaves.delete(id);
       },
@@ -221,7 +238,11 @@ function createHarness(settings = {}, layoutReady = false, supportsDeferredViews
       throw new Error(`Unexpected dependency: ${name}`);
     },
     window: {
-      setTimeout(callback) { const id = ++nextTimer; timers.set(id, callback); return id; },
+      setTimeout(callback, delay = 0) {
+        const id = ++nextTimer;
+        timers.set(id, { callback, at: clockTime + delay });
+        return id;
+      },
       clearTimeout(id) { timers.delete(id); }
     },
     crypto: { randomUUID }, HTMLInputElement: InputElement,
@@ -232,13 +253,21 @@ function createHarness(settings = {}, layoutReady = false, supportsDeferredViews
   return {
     plugin, workspace, mainDocument, leaves, windows, notices, addLeaf, TFile,
     saved: () => structuredClone(stored),
+    pendingTimers: () => timers.size,
     pressShortcut(accelerator = plugin.getGlobalToggleShortcut()) {
       const callback = shortcuts.get(accelerator);
       if (!callback) throw new Error("Shortcut is not registered");
       callback();
     },
     ready() { workspace.layoutReady = true; for (const callback of readyCallbacks.splice(0)) callback(); },
-    flushTimers() { const callbacks = [...timers.values()]; timers.clear(); for (const callback of callbacks) callback(); }
+    flushTimers(nextOnly = false) {
+      if (!timers.size) return;
+      const dueTimes = [...timers.values()].map((timer) => timer.at);
+      clockTime = nextOnly ? Math.min(...dueTimes) : Math.max(...dueTimes);
+      const due = [...timers].filter(([, timer]) => timer.at <= clockTime);
+      for (const [id] of due) timers.delete(id);
+      for (const [, timer] of due) timer.callback();
+    }
   };
 }
 

@@ -6,6 +6,13 @@ const settled = () => new Promise((resolve) => setImmediate(resolve));
 const isSticky = (leaf) => leaf.document.body.classList.contains("desktop-sticky-note");
 const action = (leaf, title) => leaf.view.actions.children.find((element) => element.title === title);
 
+async function advanceTimers(h, turns = 1) {
+  for (let turn = 0; turn < turns; turn++) {
+    h.flushTimers(true);
+    await settled();
+  }
+}
+
 test("the registered global shortcut opens, hides, and reopens a note absent from the layout snapshot", async () => {
   const h = createHarness({ topLevelNotePath: "Notes/Example.md" }, true);
   const main = h.addLeaf("main", { popout: false });
@@ -152,7 +159,7 @@ test("restores deferred and late-arriving popouts once without activating them",
   await h.plugin.openStickyNote(new h.TFile("Notes/New.md"));
   const late = h.addLeaf("late");
   h.workspace.trigger("layout-change");
-  h.flushTimers();
+  await advanceTimers(h);
   assert.equal(isSticky(late), true);
   assert.equal(deferred.view.actions.children.length, 4);
 });
@@ -259,12 +266,244 @@ test("failed native-window lookup leaves the restored view intact and retries on
   const leaf = h.addLeaf("sticky", { native: false });
   const originalTitle = leaf.document.title;
   await h.plugin.onload();
+  await advanceTimers(h, 150);
   assert.equal(leaf.document.title, originalTitle);
   assert.equal(leaf.detaches, 0);
   assert.equal(h.notices.length, 0);
+  assert.equal(h.pendingTimers(), 0, "failed restoration must stop polling");
   h.windows.push(leaf.nativeWindow);
   h.workspace.trigger("layout-change");
+  await settled();
   assert.equal(isSticky(leaf), true);
+});
+
+test("restoration waits for DOM titles to reach Electron without another layout event", async () => {
+  const h = createHarness({ stickyNoteLeafIds: ["sticky"] }, true);
+  const leaf = h.addLeaf("sticky", { asyncTitle: true });
+  const ordinary = h.addLeaf("ordinary", { asyncTitle: true });
+  await h.plugin.onload();
+  assert.equal(isSticky(leaf), false, "the native title has not propagated yet");
+  await advanceTimers(h, 3);
+  assert.equal(isSticky(leaf), true);
+  assert.equal(leaf.view.actions.children.length, 4);
+  assert.equal(leaf.detaches, 0);
+  assert.equal(isSticky(ordinary), false);
+  assert.equal(h.notices.length, 0);
+});
+
+test("restoration waits for a view to reach its popout document and never styles the main window", async () => {
+  const h = createHarness({ stickyNoteLeafIds: ["sticky"] }, true);
+  const main = h.addLeaf("main", { popout: false });
+  const leaf = h.addLeaf("sticky");
+  leaf.view.containerEl.ownerDocument = h.mainDocument;
+  await h.plugin.onload();
+  assert.equal(isSticky(main), false);
+  assert.equal(isSticky(leaf), false);
+  leaf.view.containerEl.ownerDocument = leaf.document;
+  await advanceTimers(h, 3);
+  assert.equal(isSticky(leaf), true);
+  assert.equal(leaf.view.actions.children.length, 4);
+  assert.equal(isSticky(main), false);
+});
+
+test("restores a native window that becomes available after layout readiness without another event", async () => {
+  const h = createHarness({ stickyNoteLeafIds: ["sticky"] }, true);
+  const leaf = h.addLeaf("sticky", { native: false });
+  await h.plugin.onload();
+  h.windows.push(leaf.nativeWindow);
+  await advanceTimers(h, 3);
+  assert.equal(isSticky(leaf), true);
+  assert.equal(leaf.view.actions.children.length, 4);
+  assert.equal(h.workspace.popoutsOpened, 0);
+});
+
+test("restores a leaf arriving after the layout-ready callback without another event", async () => {
+  const h = createHarness({ stickyNoteLeafIds: ["late"] }, true);
+  await h.plugin.onload();
+  const leaf = h.addLeaf("late");
+  await advanceTimers(h, 3);
+  assert.equal(isSticky(leaf), true);
+  assert.equal(h.workspace.popoutsOpened, 0);
+});
+
+test("a newly opened note saves its identity while native discovery is still pending", async () => {
+  const h = createHarness({}, true);
+  const originalOpen = h.workspace.openPopoutLeaf.bind(h.workspace);
+  h.workspace.openPopoutLeaf = () => {
+    const leaf = originalOpen();
+    h.windows.splice(h.windows.indexOf(leaf.nativeWindow), 1);
+    return leaf;
+  };
+  await h.plugin.onload();
+  const opening = h.plugin.openStickyNote(new h.TFile("Notes/New.md"));
+  await settled();
+  assert.deepEqual(h.saved().stickyNoteLeafIds, ["new-1"]);
+  const leaf = h.leaves.get("new-1");
+  const pendingTitle = leaf.document.title;
+  h.workspace.trigger("layout-change");
+  assert.equal(leaf.document.title, pendingTitle, "layout events must not start a competing title lookup");
+  h.workspace.trigger("quit");
+  h.plugin.unload();
+  await advanceTimers(h);
+  await opening;
+  assert.deepEqual(h.saved().stickyNoteLeafIds, ["new-1"]);
+  assert.equal(leaf.detaches, 0);
+});
+
+test("failed discovery of a new note restores its title and removes the closed identity", async () => {
+  const h = createHarness({}, true);
+  const originalOpen = h.workspace.openPopoutLeaf.bind(h.workspace);
+  h.workspace.openPopoutLeaf = () => {
+    const leaf = originalOpen();
+    h.windows.splice(h.windows.indexOf(leaf.nativeWindow), 1);
+    return leaf;
+  };
+  await h.plugin.onload();
+  const opening = h.plugin.openStickyNote(new h.TFile("Notes/New.md"));
+  await settled();
+  const leaf = h.leaves.get("new-1");
+  await advanceTimers(h, 25);
+  await opening;
+  assert.deepEqual(h.saved().stickyNoteLeafIds, []);
+  assert.equal(leaf.document.title, "Example — Obsidian");
+  assert.equal(leaf.detaches, 1);
+  assert.equal(h.leaves.size, 0);
+  assert.equal(h.notices.length, 1);
+  assert.equal(h.pendingTimers(), 0);
+});
+
+test("restoration cannot complete after shutdown, closing the popout, or moving it to the main window", async () => {
+  for (const change of ["quit", "disable", "close", "beforeunload", "move"]) {
+    const h = createHarness({ stickyNoteLeafIds: ["sticky"] }, true);
+    const leaf = h.addLeaf("sticky", { native: false });
+    const originalTitle = leaf.document.title;
+    await h.plugin.onload();
+    if (change === "quit") h.workspace.trigger("quit");
+    else if (change === "disable") h.plugin.unload();
+    else if (change === "close") leaf.nativeWindow.close();
+    else if (change === "beforeunload") leaf.document.defaultView.dispatchEvent(new Event("beforeunload"));
+    else leaf.container = {};
+    h.windows.push(leaf.nativeWindow);
+    await advanceTimers(h, 25);
+    assert.equal(isSticky(leaf), false, change);
+    assert.equal(leaf.view.actions.children.length, 0, change);
+    assert.equal(leaf.document.title, originalTitle, change);
+    assert.equal(h.pendingTimers(), 0, change);
+    assert.equal(h.notices.length, 0, change);
+  }
+});
+
+test("a disappearing native proxy does not prevent a surviving note from restoring", async () => {
+  const h = createHarness({ stickyNoteLeafIds: ["sticky"] }, true);
+  const unrelated = h.addLeaf("ordinary");
+  unrelated.nativeWindow.getTitle = () => { throw new Error("Window closed"); };
+  const leaf = h.addLeaf("sticky");
+  await h.plugin.onload();
+  assert.equal(isSticky(leaf), true);
+  assert.equal(leaf.view.actions.children.length, 4);
+  assert.equal(isSticky(unrelated), false);
+  assert.equal(h.notices.length, 0);
+});
+
+test("the global shortcut waits for pending native discovery without opening a duplicate", async () => {
+  const h = createHarness({ stickyNoteLeafIds: ["sticky"], topLevelNotePath: "Notes/Example.md" }, true);
+  const leaf = h.addLeaf("sticky", { asyncTitle: true });
+  await h.plugin.onload();
+  h.pressShortcut();
+  await advanceTimers(h, 3);
+  assert.equal(h.workspace.popoutsOpened, 0);
+  assert.equal(isSticky(leaf), true);
+  assert.equal(leaf.view.actions.children.length, 4);
+  assert.equal(leaf.nativeWindow.focused, true);
+  assert.deepEqual(h.saved().stickyNoteLeafIds, ["sticky"]);
+});
+
+test("closing an unresolved deferred note releases the shortcut so it can open another note", async () => {
+  const h = createHarness({ stickyNoteLeafIds: ["sticky"], topLevelNotePath: "Notes/Example.md" }, true);
+  const leaf = h.addLeaf("sticky", { deferred: true });
+  await h.plugin.onload();
+  h.pressShortcut();
+  assert.equal(h.plugin.toggleInProgress, true);
+  leaf.nativeWindow.close();
+  await advanceTimers(h, 3);
+  assert.equal(h.plugin.toggleInProgress, false);
+  assert.equal(h.plugin.initializingLeaves.size, 0);
+  assert.equal(h.workspace.popoutsOpened, 0, "closing cancels the pending shortcut press");
+
+  h.pressShortcut();
+  await settled();
+  assert.equal(h.workspace.popoutsOpened, 1);
+  assert.equal(isSticky(h.leaves.get("new-1")), true);
+  assert.equal(h.plugin.toggleInProgress, false);
+});
+
+test("an unresolved deferred view cannot lock the global shortcut indefinitely", async () => {
+  const h = createHarness({ stickyNoteLeafIds: ["sticky"], topLevelNotePath: "Notes/Example.md" }, true);
+  const leaf = h.addLeaf("sticky", { deferred: true });
+  await h.plugin.onload();
+  for (let press = 0; press < 2; press++) {
+    h.pressShortcut();
+    assert.equal(h.plugin.toggleInProgress, true);
+    await advanceTimers(h, 12);
+    assert.equal(h.plugin.toggleInProgress, false);
+    assert.equal(h.workspace.popoutsOpened, 0);
+  }
+  leaf.nativeWindow.close();
+  await advanceTimers(h, 3);
+  assert.equal(h.plugin.initializingLeaves.size, 0);
+  assert.equal(h.pendingTimers(), 0);
+});
+
+test("a stalled second restoration does not block toggling an already working note", async () => {
+  const h = createHarness({ stickyNoteLeafIds: ["ready", "pending"], topLevelNotePath: "Notes/Example.md" }, true);
+  const ready = h.addLeaf("ready");
+  const pending = h.addLeaf("pending", { deferred: true });
+  await h.plugin.onload();
+  h.pressShortcut();
+  await settled();
+  assert.equal(ready.nativeWindow.focused, true);
+  assert.equal(h.plugin.toggleInProgress, false);
+  assert.equal(pending.loadCalls, 1);
+  assert.equal(h.workspace.popoutsOpened, 0);
+  h.pressShortcut();
+  await settled();
+  assert.equal(ready.nativeWindow.closes, 1);
+  assert.equal(h.plugin.toggleInProgress, false);
+  assert.equal(h.workspace.popoutsOpened, 0);
+});
+
+test("disabling or quitting cancels shortcut waits without completing a deferred load", async () => {
+  for (const ending of ["disable", "quit"]) {
+    const h = createHarness({ stickyNoteLeafIds: ["sticky"], topLevelNotePath: "Notes/Example.md" }, true);
+    h.addLeaf("sticky", { deferred: true });
+    await h.plugin.onload();
+    h.pressShortcut();
+    if (ending === "disable") h.plugin.unload();
+    else h.workspace.trigger("quit");
+    await advanceTimers(h, 3);
+    assert.equal(h.plugin.toggleInProgress, false, ending);
+    assert.equal(h.plugin.initializingLeaves.size, 0, ending);
+    assert.equal(h.workspace.popoutsOpened, 0, ending);
+    assert.equal(h.pendingTimers(), 0, ending);
+  }
+});
+
+test("partial native setup can retry and finish installing working controls", async () => {
+  const h = createHarness({ stickyNoteLeafIds: ["sticky"] }, true);
+  const leaf = h.addLeaf("sticky");
+  let setupCalls = 0;
+  leaf.nativeWindow.setResizable = () => {
+    if (++setupCalls === 1) throw new Error("Native window not ready");
+  };
+  await h.plugin.onload();
+  assert.equal(leaf.view.actions.children.length, 0);
+  await advanceTimers(h, 3);
+  assert.equal(isSticky(leaf), true);
+  assert.equal(leaf.view.actions.children.length, 4);
+  action(leaf, "Keep on top").callback();
+  assert.equal(leaf.nativeWindow.alwaysOnTop, true);
+  assert.equal(leaf.detaches, 0);
+  assert.equal(h.notices.length, 0);
 });
 
 test("does not destroy unrelated windows with sticky-looking titles on startup", async () => {
