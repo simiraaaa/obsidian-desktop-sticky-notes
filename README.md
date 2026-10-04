@@ -12,6 +12,10 @@ An Obsidian desktop-only plugin that opens real Markdown files in resizable stic
 
 Each sticky-note window has controls for keeping it above other applications, selecting a color, switching between edit and reading views, and hiding it. Window contents are the underlying Obsidian Markdown file, so edits and previews stay in sync with the vault.
 
+Sticky-note windows left open when Obsidian quits or reloads regain their styling, saved color, and controls when Obsidian restores the workspace. Their size, position, and edit/reading view are restored by Obsidian. Ordinary popout windows, including ones displaying the same file, remain ordinary windows.
+
+If a window already lost its sticky-note controls before installing this fix, close that window and use **Open sticky note for current file** once. Older versions did not save the window identity needed to recognize it after a restart.
+
 > [!NOTE]
 > On Linux, **Keep on top** works when Obsidian runs under X11 or XWayland. Electron does not support the required always-on-top window state under native Wayland, so the pin control cannot change window stacking in a native Wayland session.
 
@@ -30,7 +34,7 @@ Copy `manifest.json`, `main.js`, and `styles.css` into:
 <vault>/.obsidian/plugins/desktop-sticky-notes/
 ```
 
-Then enable **Desktop Sticky Notes** under Obsidian's community-plugin settings. This plugin requires the desktop version of Obsidian.
+Then enable **Desktop Sticky Notes** under Obsidian's community-plugin settings. This plugin requires Obsidian desktop 1.5.1 or newer.
 
 ## Permissions and privacy
 
@@ -39,3 +43,9 @@ Desktop Sticky Notes uses Obsidian's Electron APIs to manage popout windows and 
 ## License
 
 Desktop Sticky Notes is available under the [MIT License](LICENSE).
+
+## Development
+
+Run `npm test`, `npm run check`, `npm run lint`, and `npm run build` to verify a change. The tests exercise the plugin lifecycle with simulated Obsidian and Electron APIs; they do not launch Obsidian.
+
+To check restart behavior in Obsidian, open two sticky notes and an ordinary popout of the same file, change a sticky note's color and reading view, then restart without closing the windows. Confirm that the sticky notes retain their appearance and working controls, that the ordinary popout is unchanged, and that hiding a sticky note keeps it closed after the next restart. Also check **Reload app without saving**, and disabling/re-enabling the plugin (which closes its windows).
