@@ -14,7 +14,9 @@ Each sticky-note window has controls for keeping it above other applications, se
 
 Sticky-note windows left open when Obsidian quits or reloads regain their styling, saved color, and controls when Obsidian restores the workspace, including after closing the main window. Restoration waits for Electron's native windows and retries for a few seconds while popouts load. Their size, position, and edit/reading view are restored by Obsidian. Ordinary popout windows, including ones displaying the same file, remain ordinary windows.
 
-If a window already lost its sticky-note controls before installing this fix, close that window and use **Open sticky note for current file** once. Older versions did not save the window identity needed to recognize it after a restart.
+As of version 1.0.6, each sticky window saves its identity in Obsidian's workspace state. Restoration also accepts the window IDs saved by earlier versions, but no longer depends on that separate settings record being present or the IDs staying the same.
+
+If a window already lost its sticky-note controls before installing this fix, close that window and use **Open sticky note for current file** once after updating. A previously unmarked regular window cannot be distinguished safely from an ordinary popout of the same file.
 
 > [!NOTE]
 > On Linux, **Keep on top** works when Obsidian runs under X11 or XWayland. Electron does not support the required always-on-top window state under native Wayland, so the pin control cannot change window stacking in a native Wayland session.
@@ -48,4 +50,6 @@ Desktop Sticky Notes is available under the [MIT License](LICENSE).
 
 Run `npm test`, `npm run check`, `npm run lint`, and `npm run build` to verify a change. The tests exercise the plugin lifecycle with simulated Obsidian and Electron APIs; they do not launch Obsidian.
 
-To check restart behavior in Obsidian, open two sticky notes and an ordinary popout of the same file, change a sticky note's color and reading view, then close the main window with the popouts still open and relaunch Obsidian. Confirm that the sticky notes retain their appearance and working controls, that the ordinary popout is unchanged, and that hiding a sticky note keeps it closed after the next restart. Also check **Reload app without saving**, and disabling/re-enabling the plugin (which closes its windows). With a top-level note designated and its windows closed, verify that the global shortcut opens, hides, and reopens it, including after a restart.
+To check restart behavior in Obsidian, open two sticky notes and an ordinary popout of the same file, change a sticky note's color and reading view, then close the main window with the popouts still open and relaunch Obsidian. Confirm that the sticky notes retain their appearance and working controls, that the ordinary popout is unchanged, and that hiding a sticky note keeps it closed after the next restart. In a disposable test vault, also remove `stickyNoteLeafIds` from the plugin's `data.json` while Obsidian is closed and confirm that the workspace markers still restore the sticky windows. Also check **Reload app without saving**, and disabling/re-enabling the plugin (which closes its windows). With a top-level note designated and its windows closed, verify that the global shortcut opens, hides, and reopens it, including after a restart.
+
+The workspace persistence decision and its compatibility constraints are documented in [the architecture record](docs/decisions/0001-sticky-workspace-identity.md).

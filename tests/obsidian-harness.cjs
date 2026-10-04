@@ -69,7 +69,8 @@ class MarkdownView {
     return action;
   }
   getMode() { return this.mode; }
-  async setState(state) { this.mode = state.mode; }
+  getState() { return { file: this.file?.path, mode: this.mode }; }
+  async setState(state) { if (state.mode) this.mode = state.mode; }
 }
 
 function createDocument() {
@@ -103,6 +104,15 @@ function createHarness(settings = {}, layoutReady = false, supportsDeferredViews
   let nextLeaf = 0;
   let stored = structuredClone(settings);
 
+  // Each harness has its own Obsidian runtime. Prototype wrappers must not
+  // leak from one simulated app into another restart or test case.
+  class WorkspaceLeaf {
+    getViewState() {
+      return { type: this.isDeferred || this.view instanceof MarkdownView ? "markdown" : "other", state: this.view.getState?.() ?? {} };
+    }
+    async setViewState(state) { await this.view.setState(state.state ?? {}); }
+  }
+
   const workspace = Object.assign(new Events(), {
     layoutReady,
     containerEl: { ownerDocument: mainDocument },
@@ -112,7 +122,7 @@ function createHarness(settings = {}, layoutReady = false, supportsDeferredViews
     getLeafById(id) { return leaves.get(id) ?? null; },
     iterateAllLeaves(callback) { for (const leaf of leaves.values()) callback(leaf); },
     getLayout() {
-      const state = (leaf) => ({ type: "leaf", id: leaf.id, state: { type: "markdown", state: { file: leaf.view.file?.path } } });
+      const state = (leaf) => ({ type: "leaf", id: leaf.id, state: leaf.getViewState() });
       return {
         main: { type: "split", children: [...leaves.values()].filter((leaf) => !leaf.popout).map(state) },
         floating: { type: "floating", children: [...leaves.values()].filter((leaf) => leaf.popout).map((leaf) => ({
@@ -124,7 +134,7 @@ function createHarness(settings = {}, layoutReady = false, supportsDeferredViews
     openPopoutLeaf() { this.popoutsOpened++; return addLeaf(`new-${++nextLeaf}`); }
   });
 
-  function addLeaf(id, { file = new TFile("Notes/Example.md"), popout = true, deferred = false, native = true, asyncTitle = false } = {}) {
+  function addLeaf(id, { file = new TFile("Notes/Example.md"), popout = true, deferred = false, native = true, asyncTitle = false, state = {} } = {}) {
     const document = popout ? createDocument() : mainDocument;
     let nativeTitle = document.title;
     if (asyncTitle) {
@@ -140,17 +150,18 @@ function createHarness(settings = {}, layoutReady = false, supportsDeferredViews
       });
     }
     const view = new MarkdownView(file, document);
+    view.app = app;
+    if (state.mode) view.mode = state.mode;
     const container = popout ? new WorkspaceWindow() : {};
     if (popout) Object.assign(container, { doc: document, win: document.defaultView });
     let resolveLoad;
-    const leaf = {
+    const leaf = Object.assign(new WorkspaceLeaf(), {
       id, popout, document, container,
-      view: deferred ? { containerEl: view.containerEl } : view,
+      view: deferred ? { app, containerEl: view.containerEl, getState: () => ({ file: file.path, ...state }) } : view,
       isDeferred: deferred,
       loadCalls: 0,
       detaches: 0,
       getContainer() { return this.container; },
-      getViewState() { return { type: this.isDeferred || this.view instanceof MarkdownView ? "markdown" : "other", state: { file: view.file.path } }; },
       async openFile(opened, { active = false } = {}) {
         this.view.file = opened;
         files.set(opened.path, opened);
@@ -171,7 +182,7 @@ function createHarness(settings = {}, layoutReady = false, supportsDeferredViews
         // native window just as Obsidian does for an empty popout.
         if (popout && !this.nativeWindow.isDestroyed()) this.nativeWindow.close();
       }
-    };
+    });
     const nativeWindow = {
       destroyed: false, closes: 0, destroys: 0, focused: false, alwaysOnTop: false,
       setResizable() {}, setParentWindow(parent) { this.parent = parent; }, setSkipTaskbar() {},
@@ -204,6 +215,7 @@ function createHarness(settings = {}, layoutReady = false, supportsDeferredViews
     async loadData() { return structuredClone(stored); }
     async saveData(data) { stored = structuredClone(data); }
     addSettingTab() {} addCommand() {}
+    register(cleanup) { this.cleanups.push(cleanup); }
     registerEvent(ref) { this.cleanups.push(() => ref.off()); }
     registerDomEvent(target, name, callback) {
       target.addEventListener(name, callback);
@@ -212,7 +224,7 @@ function createHarness(settings = {}, layoutReady = false, supportsDeferredViews
     unload() { this.onunload(); for (const cleanup of this.cleanups) cleanup(); }
   }
   const obsidian = {
-    Plugin, MarkdownView, WorkspaceWindow, TFile,
+    Plugin, MarkdownView, WorkspaceLeaf, WorkspaceWindow, TFile,
     Notice: class { constructor(message) { notices.push(message); } },
     Platform: { isMacOS: false, isWin: false },
     requireApiVersion: () => supportsDeferredViews,

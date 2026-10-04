@@ -1,5 +1,5 @@
 import { MarkdownView, Notice, Platform, Plugin, PluginSettingTab, Setting, TAbstractFile, TFile, WorkspaceLeaf, WorkspaceWindow, normalizePath, requireApiVersion, setIcon, setTooltip } from "obsidian";
-import type { SettingDefinitionItem } from "obsidian";
+import type { SettingDefinitionItem, ViewState } from "obsidian";
 import { BrowserWindow, globalShortcut, screen } from "@electron/remote";
 
 const DEFAULT_COLOR = "#fff3a3";
@@ -11,6 +11,7 @@ const RESTORATION_RETRY_LIMIT = 20;
 const RESTORATION_RETRY_INTERVAL = 250;
 const TOGGLE_INITIALIZATION_WAIT = 2000;
 const WINDOW_NAME_PREFIX = "desktop-sticky-notes:";
+const STICKY_VIEW_STATE_KEY = "desktopStickyNote";
 const LEGACY_DEFAULT_GLOBAL_SHORTCUT = "CommandOrControl+Alt+N";
 
 type DesktopPlatform = "linux" | "macos" | "windows";
@@ -194,6 +195,7 @@ export default class DesktopStickyNotesPlugin extends Plugin {
   settings: StickyNoteSettings = createDefaultSettings();
   private notesByPath = new Map<string, Set<StickyNoteWindow>>();
   private initializedLeaves = new WeakSet<WorkspaceLeaf>();
+  private stickyStateLeaves = new WeakSet<WorkspaceLeaf>();
   private initializingLeaves = new Map<WorkspaceLeaf, PendingStickyNoteInitialization>();
   private watchedLeafWindows = new WeakMap<WorkspaceLeaf, Window>();
   private closingLeaves = new WeakSet<WorkspaceLeaf>();
@@ -201,11 +203,15 @@ export default class DesktopStickyNotesPlugin extends Plugin {
   private quitting = false;
   private restorationTimer: number | null = null;
   private restorationRetries = 0;
+  private discoveringRestoredLeaves = true;
   private registeredGlobalShortcut: string | null = null;
   private shortcutRegistrationTimer: number | null = null;
   private toggleInProgress = false;
 
   async onload(): Promise<void> {
+    // Capture workspace markers before asynchronous settings loading gives
+    // Obsidian a chance to construct Markdown views and discard unknown state.
+    this.registerStickyStatePersistence();
     await this.loadSettings();
     this.addSettingTab(new DesktopStickyNotesSettingTab(this.app, this));
     this.registerCommands();
@@ -231,6 +237,46 @@ export default class DesktopStickyNotesPlugin extends Plugin {
       this.cancelPendingInitializations();
     });
     this.app.workspace.onLayoutReady(() => this.restoreStickyNotes());
+  }
+
+  private registerStickyStatePersistence(): void {
+    const app = this.app;
+    const stickyLeaves = this.stickyStateLeaves;
+    // Capture unbound methods deliberately: each wrapper calls the original
+    // with the invoking leaf, including when another plugin chains a wrapper.
+    // eslint-disable-next-line @typescript-eslint/unbound-method -- The wrapper supplies the invoking leaf through call().
+    const originalGetViewState = WorkspaceLeaf.prototype.getViewState;
+    // eslint-disable-next-line @typescript-eslint/unbound-method -- The wrapper supplies the invoking leaf through call().
+    const originalSetViewState = WorkspaceLeaf.prototype.setViewState;
+    let active = true;
+
+    function getViewState(this: WorkspaceLeaf): ViewState {
+      const state = originalGetViewState.call(this);
+      // Keep normal Markdown views and their complete state. Only the known
+      // popout gets a marker; an ordinary popout of the same file does not.
+      if (!active || this.view?.app !== app || !stickyLeaves.has(this)
+        || state.type !== "markdown" || !(this.getContainer() instanceof WorkspaceWindow)) return state;
+      return { ...state, state: { ...state.state, [STICKY_VIEW_STATE_KEY]: true } };
+    }
+
+    function setViewState(this: WorkspaceLeaf, state: ViewState, ephemeralState?: unknown): Promise<void> {
+      if (active && this.view?.app === app && state.type === "markdown"
+        && state.state?.[STICKY_VIEW_STATE_KEY] === true) stickyLeaves.add(this);
+      return originalSetViewState.call(this, state, ephemeralState);
+    }
+
+    // Obsidian's MarkdownView ignores additional state keys. Intercept the
+    // public leaf methods so the marker survives view creation and is included
+    // in the workspace file that Obsidian saves on main-window shutdown.
+    WorkspaceLeaf.prototype.getViewState = getViewState;
+    WorkspaceLeaf.prototype.setViewState = setViewState;
+    this.register(() => {
+      active = false;
+      // Another plugin may have wrapped these methods after us. In that case,
+      // leave its wrapper in place and make our retained wrapper pass through.
+      if (WorkspaceLeaf.prototype.getViewState === getViewState) WorkspaceLeaf.prototype.getViewState = originalGetViewState;
+      if (WorkspaceLeaf.prototype.setViewState === setViewState) WorkspaceLeaf.prototype.setViewState = originalSetViewState;
+    });
   }
 
   onunload(): void {
@@ -263,6 +309,17 @@ export default class DesktopStickyNotesPlugin extends Plugin {
           closedLeafIds.add(id);
           leaf.detach();
         }
+      }
+      const markedLeaves: WorkspaceLeaf[] = [];
+      this.app.workspace.iterateAllLeaves((leaf) => {
+        const state = leaf.getViewState();
+        if (leaf.getContainer() instanceof WorkspaceWindow && state.type === "markdown"
+          && state.state?.[STICKY_VIEW_STATE_KEY] === true) markedLeaves.push(leaf);
+      });
+      for (const leaf of markedLeaves) {
+        const id = this.workspaceLeafId(leaf);
+        if (id) closedLeafIds.add(id);
+        leaf.detach();
       }
       // Keep identities for windows that have not arrived yet; if the plugin
       // is re-enabled after startup, it must still be able to recognize them.
@@ -530,6 +587,9 @@ export default class DesktopStickyNotesPlugin extends Plugin {
       for (const note of [...(this.notesByPath.get(path) ?? [])]) {
         this.rememberTopLevelPosition(note);
         this.forgetStickyNote(note);
+        // Obsidian may replace the view before beforeunload fires, so its
+        // document/ownership checks cannot reliably untrack a native close.
+        this.untrackNote(note);
       }
       for (const nativeWindow of knownWindows) {
         try {
@@ -595,6 +655,7 @@ export default class DesktopStickyNotesPlugin extends Plugin {
     // Restoration already resolved this leaf through getLeafById. Keep that
     // identity even if the layout snapshot is temporarily incomplete.
     const leafId = restoredLeafId ?? this.workspaceLeafId(leaf);
+    this.stickyStateLeaves.add(leaf);
     // Save before waiting for native/DOM readiness so a main-window shutdown
     // cannot erase the identity of a newly opened popout.
     if (leafId) this.rememberStickyLeafId(leafId);
@@ -766,15 +827,30 @@ export default class DesktopStickyNotesPlugin extends Plugin {
 
   private restoreStickyNotes(): void {
     if (this.unloading || this.quitting || !this.app.workspace.layoutReady) return;
-    let pending = false;
+    // With no legacy IDs, the first scan cannot tell whether marked popouts
+    // have all arrived. Keep discovery bounded to the same startup retry window.
+    let pending = this.discoveringRestoredLeaves;
+    const candidates = new Map<WorkspaceLeaf, string | null>();
     for (const id of this.settings.stickyNoteLeafIds) {
       const leaf = this.app.workspace.getLeafById(id);
       if (!leaf) {
         pending = true;
         continue;
       }
+      candidates.set(leaf, id);
+    }
+    // A window must remain recognizable if plugin data was not flushed at
+    // shutdown or Obsidian restored it with a different ID. Its own workspace
+    // state is authoritative; legacy IDs remain a migration fallback.
+    this.app.workspace.iterateAllLeaves((leaf) => {
+      if (leaf.getViewState().state?.[STICKY_VIEW_STATE_KEY] === true && !candidates.has(leaf)) {
+        candidates.set(leaf, this.workspaceLeafId(leaf));
+      }
+    });
+    for (const [leaf, id] of candidates) {
       if (!(leaf.getContainer() instanceof WorkspaceWindow) || leaf.getViewState().type !== "markdown"
         || this.initializedLeaves.has(leaf) || this.closingLeaves.has(leaf)) continue;
+      this.stickyStateLeaves.add(leaf);
       pending = true;
       if (this.initializingLeaves.has(leaf)) continue;
       void this.restoreStickyLeaf(id, leaf);
@@ -786,6 +862,7 @@ export default class DesktopStickyNotesPlugin extends Plugin {
       this.restorationTimer = window.setTimeout(() => {
         this.restorationTimer = null;
         this.restorationRetries++;
+        if (this.restorationRetries >= RESTORATION_RETRY_LIMIT) this.discoveringRestoredLeaves = false;
         this.restoreStickyNotes();
       }, RESTORATION_RETRY_INTERVAL);
     } else if (!pending) {
@@ -795,17 +872,17 @@ export default class DesktopStickyNotesPlugin extends Plugin {
     }
   }
 
-  private async restoreStickyLeaf(id: string, leaf: WorkspaceLeaf): Promise<void> {
+  private async restoreStickyLeaf(id: string | null, leaf: WorkspaceLeaf): Promise<void> {
     const path: unknown = leaf.getViewState().state?.file;
     const finishInitialization = this.beginLeafInitialization(leaf, typeof path === "string" ? path : null);
     try {
       // Obsidian 1.7.2+ may restore a placeholder before constructing the view.
       // Only load known sticky leaves; other background tabs stay deferred.
       if (requireApiVersion("1.7.2") && leaf.isDeferred) await leaf.loadIfDeferred();
-      if (this.unloading || this.quitting || this.app.workspace.getLeafById(id) !== leaf
+      if (this.unloading || this.quitting || (id && this.app.workspace.getLeafById(id) !== leaf)
         || !(leaf.getContainer() instanceof WorkspaceWindow)) return;
       const view = leaf.view;
-      if (view instanceof MarkdownView && view.file) await this.initializeStickyLeaf(view.file, leaf, false, id);
+      if (view instanceof MarkdownView && view.file) await this.initializeStickyLeaf(view.file, leaf, false, id ?? undefined);
     } catch {
       // A popout can close while its deferred view loads. Leave the user's
       // layout intact; scheduled retries can recover a surviving window.
@@ -815,11 +892,14 @@ export default class DesktopStickyNotesPlugin extends Plugin {
   }
 
   private forgetStickyNote(note: StickyNoteWindow): void {
+    this.stickyStateLeaves.delete(note.leaf);
     if (!note.leafId) return;
     this.forgetStickyLeafId(note.leafId);
   }
 
   private forgetStickyLeafId(leafId: string): void {
+    const leaf = this.app.workspace.getLeafById(leafId);
+    if (leaf) this.stickyStateLeaves.delete(leaf);
     this.settings.stickyNoteLeafIds = this.settings.stickyNoteLeafIds.filter((id) => id !== leafId);
     void this.saveSettings();
   }

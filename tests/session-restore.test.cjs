@@ -140,6 +140,127 @@ test("opening notes persists distinct workspace IDs and survives a full restart"
   assert.equal(isSticky(ordinary), false);
 });
 
+test("workspace markers restore notes when saved IDs are missing or change across restart", async () => {
+  const first = createHarness({ colorsByPath: { "Notes/Example.md": "#b0e0ff" } }, true);
+  await first.plugin.onload();
+  await first.plugin.openStickyNote(new first.TFile("Notes/Example.md"));
+  await first.plugin.openStickyNote(new first.TFile("Notes/Example.md"));
+  const ordinary = first.addLeaf("ordinary");
+  const firstNote = first.leaves.get("new-1");
+  await firstNote.view.setState({ mode: "preview" });
+  const serialized = first.workspace.getLayout().floating.children.map((window) => window.children[0].children[0].state);
+  assert.deepEqual(serialized.map((state) => state.state.desktopStickyNote ?? false), [true, true, false]);
+  assert.equal(ordinary.getViewState().state.desktopStickyNote, undefined);
+  first.mainDocument.defaultView.dispatchEvent(new Event("beforeunload"));
+  first.plugin.unload();
+
+  // Rebuild the workspace with different IDs and no ID record in plugin data.
+  // Deserialization must recover each window from its own state, not its path.
+  const restarted = createHarness({ ...first.saved(), stickyNoteLeafIds: [] });
+  await restarted.plugin.onload();
+  const leaves = [];
+  for (const [index, state] of serialized.entries()) {
+    const leaf = restarted.addLeaf(`restored-${index}`);
+    await leaf.setViewState(state);
+    leaves.push(leaf);
+  }
+  restarted.ready();
+  await settled();
+  assert.deepEqual(leaves.map(isSticky), [true, true, false]);
+  assert.equal(leaves[0].view.getMode(), "preview");
+  assert.equal(leaves[0].document.body.style.getPropertyValue("--sticky-note-background"), "#b0e0ff");
+  assert.equal(leaves[0].view.actions.children.length, 4);
+  assert.deepEqual(restarted.saved().stickyNoteLeafIds, ["restored-0", "restored-1"]);
+  assert.equal(restarted.workspace.popoutsOpened, 0);
+  action(leaves[0], "Hide sticky note").callback();
+  assert.equal(leaves[0].getViewState().state.desktopStickyNote, undefined);
+  assert.equal(leaves[0].nativeWindow.closes, 1);
+});
+
+test("marked deferred windows restore without saved IDs and leave ordinary views deferred", async () => {
+  const h = createHarness({}, true);
+  const leaf = h.addLeaf("sticky", { deferred: true, state: { desktopStickyNote: true, mode: "preview" } });
+  const ordinary = h.addLeaf("ordinary", { deferred: true });
+  await h.plugin.onload();
+  assert.equal(leaf.loadCalls, 1);
+  assert.equal(ordinary.loadCalls, 0);
+  leaf.finishLoading();
+  await settled();
+  assert.equal(isSticky(leaf), true);
+  assert.equal(leaf.getViewState().state.desktopStickyNote, true);
+  assert.equal(leaf.view.getMode(), "preview");
+  assert.deepEqual(h.saved().stickyNoteLeafIds, ["sticky"]);
+});
+
+test("discovers late marked popouts without saved IDs or another layout event and stops scanning", async () => {
+  const h = createHarness({}, true);
+  await h.plugin.onload();
+  const leaf = h.addLeaf("late-marked", { deferred: true, state: { desktopStickyNote: true } });
+  await advanceTimers(h);
+  assert.equal(leaf.loadCalls, 1);
+  leaf.finishLoading();
+  await settled();
+  assert.equal(isSticky(leaf), true);
+  await advanceTimers(h, 30);
+  assert.equal(h.pendingTimers(), 0);
+});
+
+test("disabling before restoration closes all marked windows without a saved ID record", async () => {
+  const h = createHarness();
+  const marked = ["one", "two"].map((id) => h.addLeaf(id, { deferred: true, state: { desktopStickyNote: true } }));
+  const ordinary = h.addLeaf("ordinary", { deferred: true });
+  await h.plugin.onload();
+  h.plugin.unload();
+  for (const leaf of marked) assert.equal(leaf.detaches, 1);
+  assert.equal(ordinary.detaches, 0);
+  assert.equal(ordinary.nativeWindow.closes, 0);
+});
+
+test("workspace markers require a boolean and never style the main document or another app", async () => {
+  const h = createHarness({}, true);
+  await h.plugin.onload();
+  const ordinary = [];
+  for (const [index, marker] of ["true", 1, false].entries()) {
+    const leaf = h.addLeaf(`ordinary-${index}`);
+    await leaf.setViewState({ type: "markdown", state: { desktopStickyNote: marker } });
+    ordinary.push(leaf);
+  }
+  const main = h.addLeaf("main", { popout: false });
+  await main.setViewState({ type: "markdown", state: { desktopStickyNote: true } });
+  const foreign = h.addLeaf("foreign");
+  foreign.view.app = {};
+  await foreign.setViewState({ type: "markdown", state: { desktopStickyNote: true } });
+  h.workspace.trigger("layout-change");
+  await settled();
+  for (const leaf of [...ordinary, main, foreign]) {
+    assert.equal(isSticky(leaf), false);
+    assert.equal(leaf.getViewState().state.desktopStickyNote, undefined);
+  }
+  assert.equal(h.saved().stickyNoteLeafIds, undefined);
+});
+
+test("marker serialization preserves Markdown state and releases wrappers without replacing another plugin", async () => {
+  const h = createHarness({}, true);
+  const leaf = h.addLeaf("sticky");
+  const prototype = Object.getPrototypeOf(leaf);
+  const originalGet = prototype.getViewState;
+  const originalSet = prototype.setViewState;
+  const markdownState = { file: leaf.view.file.path, mode: "preview", source: true, backlinks: true };
+  leaf.view.getState = () => markdownState;
+  await h.plugin.onload();
+  await leaf.setViewState({ type: "markdown", state: { desktopStickyNote: true } });
+  assert.deepEqual({ ...leaf.getViewState().state }, { ...markdownState, desktopStickyNote: true });
+  assert.equal(markdownState.desktopStickyNote, undefined, "do not mutate the core view's state object");
+  const stickyGet = prototype.getViewState;
+  const laterGet = function () { return stickyGet.call(this); };
+  prototype.getViewState = laterGet;
+  h.plugin.unload();
+  assert.equal(prototype.getViewState, laterGet);
+  assert.equal(prototype.setViewState, originalSet);
+  assert.equal(leaf.getViewState().state.desktopStickyNote, undefined);
+  assert.deepEqual(leaf.getViewState(), originalGet.call(leaf));
+});
+
 test("restores deferred and late-arriving popouts once without activating them", async () => {
   const h = createHarness({ stickyNoteLeafIds: ["deferred", "late"] });
   const deferred = h.addLeaf("deferred", { deferred: true });
@@ -369,6 +490,8 @@ test("failed discovery of a new note restores its title and removes the closed i
   assert.equal(leaf.detaches, 1);
   assert.equal(h.leaves.size, 0);
   assert.equal(h.notices.length, 1);
+  // Native lookup finishes before the bounded startup discovery period.
+  await advanceTimers(h, 25);
   assert.equal(h.pendingTimers(), 0);
 });
 
@@ -416,6 +539,33 @@ test("the global shortcut waits for pending native discovery without opening a d
   assert.equal(leaf.view.actions.children.length, 4);
   assert.equal(leaf.nativeWindow.focused, true);
   assert.deepEqual(h.saved().stickyNoteLeafIds, ["sticky"]);
+});
+
+test("the global shortcut untracks a closing window even when Obsidian clears its view before unload", async () => {
+  const h = createHarness({ topLevelNotePath: "Notes/Example.md" }, true);
+  h.addLeaf("main", { popout: false });
+  await h.plugin.onload();
+  h.pressShortcut();
+  await settled();
+  const note = [...h.plugin.allNotes()][0];
+  const leaf = note.leaf;
+  const originalClose = leaf.nativeWindow.close.bind(leaf.nativeWindow);
+  leaf.nativeWindow.close = () => {
+    leaf.container = {};
+    leaf.view = { app: h.plugin.app, containerEl: { ownerDocument: h.mainDocument } };
+    originalClose();
+  };
+  h.pressShortcut();
+  await settled();
+  assert.equal([...h.plugin.allNotes()].length, 0);
+  assert.equal(h.plugin.initializedLeaves.has(leaf), false);
+  assert.equal(leaf.getViewState().state.desktopStickyNote, undefined);
+  assert.equal(leaf.detaches, 0);
+  assert.deepEqual(h.saved().stickyNoteLeafIds, []);
+  h.pressShortcut();
+  await settled();
+  assert.equal([...h.plugin.allNotes()].length, 1);
+  assert.equal(isSticky(h.leaves.get("new-2")), true);
 });
 
 test("closing an unresolved deferred note releases the shortcut so it can open another note", async () => {
