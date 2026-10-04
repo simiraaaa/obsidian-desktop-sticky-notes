@@ -152,7 +152,7 @@ function createDefaultSettings(): StickyNoteSettings {
 interface StickyNoteWindow {
   file: TFile;
   leaf: WorkspaceLeaf;
-  leafId: string;
+  leafId: string | null;
   document: Document;
   window: NativeBrowserWindow;
   observer?: MutationObserver;
@@ -220,7 +220,7 @@ export default class DesktopStickyNotesPlugin extends Plugin {
       // On quit/reload Obsidian owns window teardown. Detaching here can save
       // an empty layout over the windows it needs to restore at the next launch.
       if (!this.quitting) {
-        closedLeafIds.add(note.leafId);
+        if (note.leafId) closedLeafIds.add(note.leafId);
         note.leaf.detach();
         this.forceCloseWindow(note.window);
       }
@@ -442,7 +442,7 @@ export default class DesktopStickyNotesPlugin extends Plugin {
   }
 
   async toggleTopLevelNote(): Promise<void> {
-    if (this.toggleInProgress) return;
+    if (this.toggleInProgress || this.unloading || this.quitting || !this.app.workspace.layoutReady) return;
     this.toggleInProgress = true;
     try {
       await this.performTopLevelToggle();
@@ -526,17 +526,12 @@ export default class DesktopStickyNotesPlugin extends Plugin {
     this.initializeStickyLeaf(file, leaf);
   }
 
-  private initializeStickyLeaf(file: TFile, leaf: WorkspaceLeaf, detachOnFailure = true): boolean {
+  private initializeStickyLeaf(file: TFile, leaf: WorkspaceLeaf, detachOnFailure = true, restoredLeafId?: string): boolean {
     if (this.unloading || this.quitting || this.initializedLeaves.has(leaf) || this.closingLeaves.has(leaf)) return false;
 
-    const leafId = this.workspaceLeafId(leaf);
-    if (!leafId) {
-      if (detachOnFailure) {
-        leaf.detach();
-        new Notice("Could not identify the sticky-note window in the workspace.");
-      }
-      return false;
-    }
+    // Restoration already resolved this leaf through getLeafById. Keep that
+    // identity even if the layout snapshot is temporarily incomplete.
+    const leafId = restoredLeafId ?? this.workspaceLeafId(leaf);
 
     // The view's ownerDocument is permanently tied to this popout. Obsidian's
     // activeDocument is global and can point at the main window after blur.
@@ -579,20 +574,18 @@ export default class DesktopStickyNotesPlugin extends Plugin {
       this.rememberTopLevelPosition(note);
       this.untrackNote(note);
     });
-    if (!this.settings.stickyNoteLeafIds.includes(leafId)) {
-      // Keep IDs, not file paths: the same file can also be open in ordinary
-      // windows. Missing IDs may belong to popouts still being restored, so
-      // remove an ID only when a note is explicitly hidden or the plugin disabled.
-      this.settings.stickyNoteLeafIds.push(leafId);
-      void this.saveSettings();
-    }
     void this.app.workspace.requestSaveLayout();
     return true;
   }
 
   private workspaceLeafId(leaf: WorkspaceLeaf): string | null {
-    // Leaf IDs survive workspace restoration, but are not exposed as a public
-    // property on WorkspaceLeaf. Resolve them through the public layout API.
+    // Obsidian exposes an ID on live leaves, but omits it from the public
+    // typings. Validate it with the public lookup before trusting it. A new
+    // popout may not appear in a serialized layout snapshot immediately.
+    const liveId = (leaf as WorkspaceLeaf & { id?: unknown }).id;
+    if (typeof liveId === "string" && liveId && this.app.workspace.getLeafById(liveId) === leaf) return liveId;
+
+    // Keep a layout fallback for versions that do not expose the runtime ID.
     const findId = (value: unknown): string | null => {
       if (!value || typeof value !== "object") return null;
       const item = value as Record<string, unknown>;
@@ -604,7 +597,13 @@ export default class DesktopStickyNotesPlugin extends Plugin {
       }
       return null;
     };
-    return findId(this.app.workspace.getLayout());
+    try {
+      return findId(this.app.workspace.getLayout());
+    } catch {
+      // Identity is needed for persistence, not for displaying the note. A
+      // later presentation refresh can retry while the workspace settles.
+      return null;
+    }
   }
 
   private restoreStickyNotes(): void {
@@ -626,7 +625,7 @@ export default class DesktopStickyNotesPlugin extends Plugin {
       if (this.unloading || this.quitting || this.app.workspace.getLeafById(id) !== leaf
         || !(leaf.getContainer() instanceof WorkspaceWindow)) return;
       const view = leaf.view;
-      if (view instanceof MarkdownView && view.file) this.initializeStickyLeaf(view.file, leaf, false);
+      if (view instanceof MarkdownView && view.file) this.initializeStickyLeaf(view.file, leaf, false, id);
     } catch {
       // A popout can close while its deferred view loads. Leave the user's
       // layout intact; a later layout change can retry a surviving window.
@@ -636,6 +635,7 @@ export default class DesktopStickyNotesPlugin extends Plugin {
   }
 
   private forgetStickyNote(note: StickyNoteWindow): void {
+    if (!note.leafId) return;
     this.settings.stickyNoteLeafIds = this.settings.stickyNoteLeafIds.filter((id) => id !== note.leafId);
     void this.saveSettings();
   }
@@ -657,6 +657,19 @@ export default class DesktopStickyNotesPlugin extends Plugin {
     window.setResizable(true);
     this.addStickyActions(note);
     this.observePresentation(note);
+    this.rememberStickyNote(note);
+  }
+
+  private rememberStickyNote(note: StickyNoteWindow): void {
+    const leafId = note.leafId ?? this.workspaceLeafId(note.leaf);
+    if (!leafId) return;
+    note.leafId = leafId;
+    if (this.settings.stickyNoteLeafIds.includes(leafId)) return;
+    // Keep IDs, not file paths: the same file can also be open in ordinary
+    // windows. Missing IDs may belong to popouts still being restored, so
+    // remove an ID only when a note is explicitly hidden or the plugin disabled.
+    this.settings.stickyNoteLeafIds.push(leafId);
+    void this.saveSettings();
   }
 
   private watchWindow(note: StickyNoteWindow, domWindow: Window): void {

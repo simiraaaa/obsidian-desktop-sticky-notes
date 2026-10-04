@@ -97,6 +97,7 @@ function createHarness(settings = {}, layoutReady = false, supportsDeferredViews
   const timers = new Map();
   const notices = [];
   const readyCallbacks = [];
+  const shortcuts = new Map();
   let nextTimer = 0;
   let nextLeaf = 0;
   let stored = structuredClone(settings);
@@ -135,7 +136,14 @@ function createHarness(settings = {}, layoutReady = false, supportsDeferredViews
       detaches: 0,
       getContainer() { return this.container; },
       getViewState() { return { type: this.isDeferred || this.view instanceof MarkdownView ? "markdown" : "other" }; },
-      async openFile(opened) { this.view.file = opened; files.set(opened.path, opened); },
+      async openFile(opened, { active = false } = {}) {
+        this.view.file = opened;
+        files.set(opened.path, opened);
+        if (active) {
+          for (const nativeWindow of windows) nativeWindow.focused = false;
+          this.nativeWindow.focused = true;
+        }
+      },
       loadIfDeferred() {
         this.loadCalls++;
         return new Promise((resolve) => { resolveLoad = () => { this.view = view; this.isDeferred = false; resolve(); }; });
@@ -197,7 +205,11 @@ function createHarness(settings = {}, layoutReady = false, supportsDeferredViews
   };
   const electron = {
     BrowserWindow: { getAllWindows: () => windows },
-    globalShortcut: { isRegistered: () => false, register: () => true, unregister() {} },
+    globalShortcut: {
+      isRegistered: (accelerator) => shortcuts.has(accelerator),
+      register(accelerator, callback) { shortcuts.set(accelerator, callback); return true; },
+      unregister(accelerator) { shortcuts.delete(accelerator); }
+    },
     screen: { getAllDisplays: () => [{ workArea: { x: 0, y: 0, width: 1920, height: 1080 } }] }
   };
   const module = { exports: {} };
@@ -220,6 +232,11 @@ function createHarness(settings = {}, layoutReady = false, supportsDeferredViews
   return {
     plugin, workspace, mainDocument, leaves, windows, notices, addLeaf, TFile,
     saved: () => structuredClone(stored),
+    pressShortcut(accelerator = plugin.getGlobalToggleShortcut()) {
+      const callback = shortcuts.get(accelerator);
+      if (!callback) throw new Error("Shortcut is not registered");
+      callback();
+    },
     ready() { workspace.layoutReady = true; for (const callback of readyCallbacks.splice(0)) callback(); },
     flushTimers() { const callbacks = [...timers.values()]; timers.clear(); for (const callback of callbacks) callback(); }
   };

@@ -6,6 +6,90 @@ const settled = () => new Promise((resolve) => setImmediate(resolve));
 const isSticky = (leaf) => leaf.document.body.classList.contains("desktop-sticky-note");
 const action = (leaf, title) => leaf.view.actions.children.find((element) => element.title === title);
 
+test("the registered global shortcut opens, hides, and reopens a note absent from the layout snapshot", async () => {
+  const h = createHarness({ topLevelNotePath: "Notes/Example.md" }, true);
+  const main = h.addLeaf("main", { popout: false });
+  h.workspace.getLayout = () => ({ main: { type: "leaf", id: "main" } });
+  await h.plugin.onload();
+
+  h.pressShortcut();
+  await settled();
+  const first = h.leaves.get("new-1");
+  assert.ok(first, "a new popout must stay open even before it is serialized");
+  assert.equal(isSticky(first), true);
+  assert.equal(first.view.actions.children.length, 4);
+  assert.equal(first.detaches, 0);
+  assert.deepEqual(h.saved().stickyNoteLeafIds, ["new-1"]);
+
+  h.pressShortcut();
+  await settled();
+  assert.equal(first.nativeWindow.closes, 1);
+  assert.deepEqual(h.saved().stickyNoteLeafIds, []);
+  h.flushTimers();
+
+  h.pressShortcut();
+  await settled();
+  const reopened = h.leaves.get("new-2");
+  assert.ok(reopened);
+  assert.equal(isSticky(reopened), true);
+  assert.deepEqual(h.saved().stickyNoteLeafIds, ["new-2"]);
+  assert.equal(h.workspace.popoutsOpened, 2);
+  assert.equal(isSticky(main), false);
+  assert.equal(h.notices.length, 0);
+});
+
+test("a note remains usable while its workspace identity is pending and saves it on a later layout event", async () => {
+  const h = createHarness({}, true);
+  const originalOpen = h.workspace.openPopoutLeaf.bind(h.workspace);
+  const originalLayout = h.workspace.getLayout.bind(h.workspace);
+  h.workspace.openPopoutLeaf = () => {
+    const leaf = originalOpen();
+    delete leaf.id;
+    return leaf;
+  };
+  h.workspace.getLayout = () => ({});
+  await h.plugin.onload();
+  await h.plugin.openStickyNote(new h.TFile("Notes/New.md"));
+  const leaf = h.leaves.get("new-1");
+  assert.ok(leaf);
+  assert.equal(isSticky(leaf), true);
+  assert.equal(leaf.view.actions.children.length, 4);
+  assert.deepEqual(h.saved().stickyNoteLeafIds ?? [], []);
+  assert.equal(h.notices.length, 0);
+
+  leaf.id = "new-1";
+  h.workspace.getLayout = originalLayout;
+  h.workspace.trigger("layout-change");
+  h.flushTimers();
+  assert.deepEqual(h.saved().stickyNoteLeafIds, ["new-1"]);
+});
+
+test("the global shortcut cannot clear the designated note while the vault is still loading", async () => {
+  const h = createHarness({ topLevelNotePath: "Notes/Example.md" });
+  await h.plugin.onload();
+  h.pressShortcut();
+  await settled();
+  assert.equal(h.plugin.settings.topLevelNotePath, "Notes/Example.md");
+  assert.equal(h.workspace.popoutsOpened, 0);
+
+  h.addLeaf("main", { popout: false });
+  h.ready();
+  h.pressShortcut();
+  await settled();
+  assert.equal(isSticky(h.leaves.get("new-1")), true);
+});
+
+test("hiding a restored note removes its known identity even if the layout snapshot is incomplete", async () => {
+  const h = createHarness({ stickyNoteLeafIds: ["saved"] }, true);
+  const leaf = h.addLeaf("saved");
+  delete leaf.id;
+  h.workspace.getLayout = () => ({});
+  await h.plugin.onload();
+  assert.equal(isSticky(leaf), true);
+  action(leaf, "Hide sticky note").callback();
+  assert.deepEqual(h.saved().stickyNoteLeafIds, []);
+});
+
 test("opening notes persists distinct workspace IDs and survives a full restart", async () => {
   const first = createHarness({ colorsByPath: { "Notes/Example.md": "#b0e0ff" } }, true);
   await first.plugin.onload();
