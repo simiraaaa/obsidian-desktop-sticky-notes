@@ -687,6 +687,7 @@ test("renaming a note preserves its identity; deleting it removes the identity",
   h.plugin.app.vault.trigger("rename", leaf.view.file, oldPath);
   assert.deepEqual(h.saved().stickyNoteLeafIds, ["sticky"]);
   h.plugin.app.vault.trigger("delete", leaf.view.file);
+  await settled(); // Settings writes finish in order behind the rename save.
   assert.deepEqual(h.saved().stickyNoteLeafIds, []);
   assert.equal(leaf.detaches, 1);
 });

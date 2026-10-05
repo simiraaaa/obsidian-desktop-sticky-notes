@@ -20,6 +20,7 @@ class Events {
   trigger(name, ...args) {
     for (const callback of this.handlers.get(name) ?? []) callback(...args);
   }
+  offref(ref) { ref.off(); }
 }
 
 class Element extends EventTarget {
@@ -52,9 +53,14 @@ class WorkspaceWindow {}
 class TFile {
   constructor(path) { this.path = path; this.basename = path.split("/").pop().replace(/\.md$/, ""); }
 }
-class MarkdownView {
+class TextFileView {
+  saveCalls = 0;
+  async save() { this.saveCalls++; }
+}
+class MarkdownView extends TextFileView {
   mode = "source";
   constructor(file, document) {
+    super();
     this.file = file;
     this.actions = new Element();
     this.actions.addClass("view-actions");
@@ -103,6 +109,8 @@ function createHarness(settings = {}, layoutReady = false, supportsDeferredViews
   let clockTime = 0;
   let nextLeaf = 0;
   let stored = structuredClone(settings);
+  let layoutSavePending = false;
+  let reloadCalls = 0;
 
   // Each harness has its own Obsidian runtime. Prototype wrappers must not
   // leak from one simulated app into another restart or test case.
@@ -117,6 +125,8 @@ function createHarness(settings = {}, layoutReady = false, supportsDeferredViews
     layoutReady,
     containerEl: { ownerDocument: mainDocument },
     layoutSaves: 0,
+    saveRuns: 0,
+    savedLayout: null,
     popoutsOpened: 0,
     onLayoutReady(callback) { if (this.layoutReady) callback(); else readyCallbacks.push(callback); },
     getLeafById(id) { return leaves.get(id) ?? null; },
@@ -130,8 +140,23 @@ function createHarness(settings = {}, layoutReady = false, supportsDeferredViews
         })) }
       };
     },
-    async requestSaveLayout() { this.layoutSaves++; },
+    requestSaveLayout() { this.layoutSaves++; layoutSavePending = true; return this.requestSaveLayout; },
     openPopoutLeaf() { this.popoutsOpened++; return addLeaf(`new-${++nextLeaf}`); }
+  });
+  workspace.requestSaveLayout.run = async () => {
+    if (!layoutSavePending) return;
+    layoutSavePending = false;
+    if (!workspace.layoutReady) return;
+    workspace.saveRuns++;
+    workspace.savedLayout = structuredClone(workspace.getLayout());
+  };
+  workspace.requestSaveLayout.cancel = () => { layoutSavePending = false; };
+  workspace.on("quit", (tasks) => {
+    if (!tasks) return; // Existing tests can exercise only the plugin's quit notification.
+    workspace.requestSaveLayout.cancel();
+    for (const leaf of leaves.values()) {
+      if (leaf.view instanceof TextFileView) tasks.addPromise(leaf.view.save());
+    }
   });
 
   function addLeaf(id, { file = new TFile("Notes/Example.md"), popout = true, deferred = false, native = true, asyncTitle = false, state = {} } = {}) {
@@ -198,12 +223,16 @@ function createHarness(settings = {}, layoutReady = false, supportsDeferredViews
         document.defaultView.closed = true;
         this.destroyed = true;
         leaves.delete(id);
+        if (popout) workspace.trigger("window-close", container, document.defaultView);
       },
       destroy() { this.destroys++; this.destroyed = true; leaves.delete(id); },
       getPosition() { return [120, 160]; }
     };
     leaf.nativeWindow = nativeWindow;
     if (native) windows.push(nativeWindow);
+    if (popout) workspace.on("quit", (tasks) => {
+      if (tasks && !nativeWindow.isDestroyed()) nativeWindow.close();
+    });
     leaves.set(id, leaf);
     files.set(file.path, file);
     return leaf;
@@ -224,7 +253,7 @@ function createHarness(settings = {}, layoutReady = false, supportsDeferredViews
     unload() { this.onunload(); for (const cleanup of this.cleanups) cleanup(); }
   }
   const obsidian = {
-    Plugin, MarkdownView, WorkspaceLeaf, WorkspaceWindow, TFile,
+    Plugin, MarkdownView, TextFileView, WorkspaceLeaf, WorkspaceWindow, TFile,
     Notice: class { constructor(message) { notices.push(message); } },
     Platform: { isMacOS: false, isWin: false },
     requireApiVersion: () => supportsDeferredViews,
@@ -260,11 +289,17 @@ function createHarness(settings = {}, layoutReady = false, supportsDeferredViews
     crypto: { randomUUID }, HTMLInputElement: InputElement,
     MutationObserver: class { observe() {} disconnect() {} }
   });
-  const app = { workspace, vault: Object.assign(new Events(), { getAbstractFileByPath: (path) => files.get(path) ?? null }) };
+  const app = {
+    workspace,
+    commands: { commands: { "app:reload": { callback: () => { reloadCalls++; } } } },
+    vault: Object.assign(new Events(), { getAbstractFileByPath: (path) => files.get(path) ?? null })
+  };
   const plugin = new module.exports.default(app);
   return {
     plugin, workspace, mainDocument, leaves, windows, notices, addLeaf, TFile,
     saved: () => structuredClone(stored),
+    reloadCalls: () => reloadCalls,
+    reload() { app.commands.commands["app:reload"].callback(); },
     pendingTimers: () => timers.size,
     pressShortcut(accelerator = plugin.getGlobalToggleShortcut()) {
       const callback = shortcuts.get(accelerator);

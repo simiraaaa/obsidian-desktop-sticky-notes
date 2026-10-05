@@ -1,7 +1,7 @@
 {
   "id": "desktop-sticky-notes",
   "name": "Desktop Sticky Notes",
-  "version": "1.0.6",
+  "version": "1.0.7",
   "minAppVersion": "1.5.1",
   "description": "Resizable, file-backed sticky notes in always-on-top desktop windows.",
   "author": "Newel",
