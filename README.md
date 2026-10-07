@@ -12,6 +12,16 @@ An Obsidian desktop-only plugin that opens real Markdown files in resizable stic
 
 Each sticky-note window has controls for keeping it above other applications, selecting a color, switching between edit and reading views, and hiding it. Window contents are the underlying Obsidian Markdown file, so edits and previews stay in sync with the vault.
 
+Sticky-note windows left open when Obsidian quits or reloads regain their styling, saved color, and controls when Obsidian restores the workspace, including after closing the main window. Restoration waits for Electron's native windows and retries for a few seconds while popouts load. Their size, position, and edit/reading view are restored by Obsidian. Ordinary popout windows, including ones displaying the same file, remain ordinary windows.
+
+As of version 1.0.6, each sticky window saves its identity in Obsidian's workspace state. Restoration also accepts the window IDs saved by earlier versions, but no longer depends on that separate settings record being present or the IDs staying the same.
+
+As of version 1.0.7, **Reload app without saving** and hotkeys assigned to that command perform an orderly reload during a sticky-note session. The plugin saves the current workspace, pending text edits, and plugin settings, runs Obsidian's normal popout shutdown, then reloads. This prevents old popouts from surviving alongside their restored replacements. Closing a sticky note with its standard window close button or its hide control keeps it closed after the next reload, including during startup before its sticky controls appear. If saving fails or a popout refuses to close, reload stops with a notice.
+
+Fully quit Obsidian before installing 1.0.7 to clear orphaned windows left by older reloads. This is a one-time upgrade step.
+
+If a window already lost its sticky-note controls before installing this fix, close that window and use **Open sticky note for current file** once after updating. A previously unmarked regular window cannot be distinguished safely from an ordinary popout of the same file.
+
 > [!NOTE]
 > On Linux, **Keep on top** works when Obsidian runs under X11 or XWayland. Electron does not support the required always-on-top window state under native Wayland, so the pin control cannot change window stacking in a native Wayland session.
 
@@ -31,7 +41,7 @@ Copy `manifest.json`, `main.js`, and `styles.css` into:
 <vault>/.obsidian/plugins/desktop-sticky-notes/
 ```
 
-Then enable **Desktop Sticky Notes** under Obsidian's community-plugin settings. This plugin requires the desktop version of Obsidian.
+Then enable **Desktop Sticky Notes** under Obsidian's community-plugin settings. This plugin requires Obsidian desktop 1.5.1 or newer.
 
 ## Permissions and privacy
 
@@ -40,3 +50,11 @@ Desktop Sticky Notes uses Obsidian's Electron APIs to manage popout windows and 
 ## License
 
 Desktop Sticky Notes is available under the [MIT License](LICENSE).
+
+## Development
+
+Run `npm test`, `npm run check`, `npm run lint`, and `npm run build` to verify a change. The tests exercise the plugin lifecycle with simulated Obsidian and Electron APIs; they do not launch Obsidian.
+
+To check restart behavior in Obsidian, open two sticky notes and an ordinary popout of the same file, change a sticky note's color and reading view, then close the main window with the popouts still open and relaunch Obsidian. Confirm that the sticky notes retain their appearance and working controls, that the ordinary popout is unchanged, and that hiding a sticky note keeps it closed after the next restart. In a disposable test vault, also remove `stickyNoteLeafIds` from the plugin's `data.json` while Obsidian is closed and confirm that the workspace markers still restore the sticky windows. Also check **Reload app without saving**, and disabling/re-enabling the plugin (which closes its windows). With a top-level note designated and its windows closed, verify that the global shortcut opens, hides, and reopens it, including after a restart.
+
+The persistence and reload compatibility constraints are documented in the architecture records for [workspace identity](docs/decisions/0001-sticky-workspace-identity.md) and [in-app reload](docs/decisions/0002-orderly-in-app-reload.md).

@@ -1,12 +1,13 @@
 {
   "name": "desktop-sticky-notes",
-  "version": "1.0.5",
+  "version": "1.0.7",
   "private": true,
   "description": "A desktop sticky-notes plugin.",
   "license": "MIT",
   "scripts": {
     "build": "node esbuild.config.mjs",
     "dev": "node esbuild.config.mjs --watch",
+    "test": "node --test tests/*.test.cjs",
     "check": "tsc --noEmit",
     "lint": "eslint main.ts"
   },
